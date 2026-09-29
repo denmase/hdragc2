@@ -51,3 +51,25 @@
 ### Verification
 - 15/15 scenarios pixel-exact (max_abs_diff = 0) vs independent Python
   references, Debug AND ReleaseFast, including SMPTE ColorBars content.
+
+## 0.2.1 (2026-09-29)
+
+### Fixed (from real-footage testing feedback)
+- Protect taper threshold unit bug in domain modes: limit is now
+  fwd(204/gain) instead of fwd(204)/gain (in log domain the old formula
+  tapered gain from gamma-luma ~5 upward, effectively disabling lifts).
+  Regression test: cb_prot (bright ColorBars, domain=log, protect=1).
+- Temporal pumping on seek/resume/scrub: non-sequential frame access now
+  resets all temporal state (ring buffer, pg IIR, scene-cut history) so
+  output is deterministic regardless of evaluation history.
+- Temporal pumping during playback: degenerate frames (e.g. black decoder
+  warm-up frames with no pixels in the analysis bins) no longer write
+  min_gain into the temporal ring buffer; the previous gain is kept.
+
+### Known issue
+- The Linux C test host prints a glibc double-free message at PROCESS
+  EXIT (after all output, after every filter instance is freed). The
+  fault is in the C++ teardown path of this specific host setup, not in
+  frame processing (16/16 scenarios pixel-exact) and not in the plugin's
+  own allocations (verified with a guard-page allocator). Does not
+  affect usage in AviSynth+ hosts.

@@ -46,28 +46,55 @@ Input: **YV12 or YUV444P 8-bit** (`Aurora(ConvertToYV12(src))`).
 
 ### Aurora usage examples
 
+Complete, ready-to-run script — pick one source filter (the commented
+lines show the common choices; each needs its own plugin DLL):
+
 ```avisynth
-LoadCPlugin("path\to\hdragc2.dll")
+LoadCPlugin("C:\App\avs64\plugins\hdragc2.dll")
 
-# 1. Basic: automatic shadow lift on dark footage (defaults)
-a = Aurora(ConvertToYV12(src))
+# ---------- 1. open the source ----------
+# Uncomment whichever matches your input and installed plugins:
+# src = FFmpegSource2("input.mp4")        # needs FFmpegSource2.dll
+# src = LSMASHVideoSource("input.mp4")    # needs LSMASHSource.dll
+# src = DGSource("index.dgi")             # needs DGDecodeNV (NVENC)
+src = AVISource("input.avi")              # built-in (uncompressed AVI)
 
-# 2. Cinematic: protect highlights, log domain for natural midtones,
-#    tamed saturation (1.8.7's max_sat=9.0 is very aggressive)
-b = Aurora(src_yv12, radius=9, corrector=0.85, protect=1,
+# Aurora works in YUV: convert once, reuse for every variant.
+# (Use ConvertToYUV444() instead for the 4:4:4 path.)
+src_yv12 = ConvertToYV12(src)
+
+# ---------- 2. process ----------
+# Basic: automatic shadow lift with defaults
+a = Aurora(src_yv12)
+
+# Cinematic: protect highlights, log domain for natural midtones,
+# tamed saturation (1.8.7's default max_sat=9.0 is very aggressive)
+b = Aurora(src_yv12, radius=9, corrector=0.85, protect=1, \
            reducer=0.8, domain="log", max_sat=3.0)
 
-# 3. Noisy footage with scene cuts: temporal gain-map smoothing with
-#    scene-change detection resetting temporal state
-c = Aurora(src_yv12, pg_smooth=0.5, scene_cut=0.3, avg_window=-1, response=30)
+# Noisy footage with scene cuts: temporal gain-map smoothing, with
+# scene-change detection resetting temporal state
+c = Aurora(src_yv12, pg_smooth=0.5, scene_cut=0.3, avg_window=-1, \
+           response=30)
 
-# 4. White balance + CLAHE engine instead of the guided filter
-d = Aurora(src_yv12, engine="clahe", clip_limit=1.5, tiles=8,
+# White balance + CLAHE engine instead of the guided filter
+d = Aurora(src_yv12, engine="clahe", clip_limit=1.5, tiles=8, \
            shift_u=2, shift_v=-1)
 
-# 5. Compare everything on a split screen
+# ---------- 3. compare on a split screen ----------
 StackHorizontal(a, b, c, d)
+
+# Or write one variant out:
+# return b
 ```
+
+Notes:
+* Multi-line calls use AviSynth+ line continuation (`\` at the start of
+  the continuation line).
+* All four variants share `src_yv12`, so they see identical input —
+  differences on screen come only from Aurora's parameters.
+* HDRAGC (the 0.1.5 port) is RGB32-only and stateless per frame:
+  `HDRAGC(ConvertToRGB32(src))` — kept for behavior compatibility.
 
 ## Build
 

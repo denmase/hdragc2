@@ -75,6 +75,7 @@ const AuroraData = struct {
     is_yv12: bool, // chroma layout: 2x2 average vs full-res
 
     // ---- state ----
+    last_n: i64 = -1, // last evaluated frame; -1 = none yet
     gauss: [256]f32,
     prev_gain: []f32, // global-gain ring buffer
     last_gain: f32 = 0.0,
@@ -285,6 +286,7 @@ fn auroraSetCacheHints(fi: [*c]c.AVS_FilterInfo, cachehints: c_int, frame_range:
 
 fn auroraFree(fi: [*c]c.AVS_FilterInfo) callconv(.c) void {
     const d: *AuroraData = @ptrCast(@alignCast(fi.*.user_data));
+    std.debug.print("[afree] w={d} h={d}\n", .{d.width, d.height});
     allocator.free(d.prev_gain);
     allocator.free(d.pg_prev);
     allocator.free(d.ybuf);
@@ -372,6 +374,20 @@ fn claheLocal(d: *AuroraData) void {
 fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_VideoFrame {
     const d: *AuroraData = @ptrCast(@alignCast(fi.*.user_data));
 
+    // Seek/preview determinism: temporal state (ring buffer, pg IIR,
+    // scene-cut history) makes output depend on evaluation history.
+    // On NON-sequential access (seek, resume, scrub) reset it so the
+    // result is identical no matter how the host reached this frame.
+    const nn: i64 = n;
+    if (d.last_n >= 0 and nn != d.last_n + 1) {
+        @memset(d.prev_gain, 0.0);
+        d.last_gain = 0.0;
+        d.index = 0;
+        d.pg_prev_valid = false;
+        d.hist_prev_valid = false;
+    }
+    d.last_n = nn;
+
     const src = api.avs_get_frame.?(fi.*.child, n);
     if (src == null) return null;
     defer api.avs_release_video_frame.?(src);
@@ -446,9 +462,16 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
         sum_bins += hist[i];
         val_bins += @as(u32, @intCast(i)) * hist[i];
     }
+    // A degenerate frame (e.g. a black decoder warm-up frame with no pixels
+    // in the analysis bins) must NOT pollute the temporal ring buffer with
+    // min_gain: it would drag the running average down and produce the
+    // dark->bright->settle pumping. Reuse the previous gain instead, and
+    // skip the ring update entirely.
+    var degenerate = false;
     var curr_gain: f32 = undefined;
     if (sum_bins == 0) {
-        curr_gain = d.min_gain;
+        degenerate = true;
+        curr_gain = if (d.last_gain > 0.0) d.last_gain else d.min_gain;
     } else {
         const mean = @as(f32, @floatFromInt(val_bins)) / @as(f32, @floatFromInt(sum_bins));
         curr_gain = @as(f32, @floatFromInt(d.avg_work)) * d.coef_gain / mean;
@@ -483,7 +506,7 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
     };
     if (d.freezer >= 0) {
         if (!d.frozen) {
-            common.buildYlut(&d.frozen_ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, d.lum_204 / curr_gain);
+            common.buildYlut(&d.frozen_ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, 204.0 / curr_gain));
             d.frozen_gain = curr_gain;
             d.frozen = true;
         }
@@ -494,6 +517,9 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
             d.index = 0;
             d.last_gain = curr_gain;
         }
+        if (degenerate) {
+            // keep last_gain; do not touch the ring buffer
+        } else {
         d.prev_gain[d.index] = curr_gain;
         d.index = (d.index + 1) % @as(usize, @intCast(d.avg_window));
         var avg: f32 = 0.0;
@@ -515,8 +541,9 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
         } else {
             d.last_gain = avg;
         }
+        }
         curr_gain = d.last_gain;
-        common.buildYlut(&ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, d.lum_204 / curr_gain);
+        common.buildYlut(&ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, 204.0 / curr_gain));
     }
 
     // ---- 6-7. local estimator + gain map + corrector + reducer ----

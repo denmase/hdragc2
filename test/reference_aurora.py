@@ -224,7 +224,16 @@ class AuroraRef:
         self.lum_204 = fwd(domain, f32(204.0))
         self.gauss = build_gauss(self.avg_work, w * h)
 
-    def process(self, Y, U, V):
+    def process(self, Y, U, V, fr=None):
+        # seek-reset mirror: fr=None means "sequential, no reset expected"
+        if fr is not None:
+            if getattr(self, '_last_fr', -1) >= 0 and fr != self._last_fr + 1:
+                self.prev_gain[:] = 0.0
+                self.last_gain = f32(0.0)
+                self.index = 0
+                self.pg_prev = None
+                self.hist_prev = None
+            self._last_fr = fr
         w, h, N = self.w, self.h, self.w * self.h
         dom = self.domain
         # 1. black_clip + shift
@@ -252,7 +261,10 @@ class AuroraRef:
         # 3. global gain
         sb = int(hist[self.bin_lo:self.bin_hi + 1].sum())
         vb = int((np.arange(self.bin_lo, self.bin_hi + 1) * hist[self.bin_lo:self.bin_hi + 1]).sum())
-        if sb == 0: curr_gain = self.min_gain
+        degenerate = False
+        if sb == 0:
+            degenerate = True
+            curr_gain = self.last_gain if self.last_gain > 0.0 else self.min_gain
         else:
             mean = f32(vb) / f32(sb)
             curr_gain = f32(f32(self.avg_work) * self.coef_gain / mean)
@@ -274,15 +286,16 @@ class AuroraRef:
         if self.freezer >= 0:
             if not self.frozen:
                 self.frozen_ylut = build_ylut(hist, self.gauss, curr_gain, protect_on,
-                                              self.lum_hi, self.lum_204 / curr_gain)
+                                              self.lum_hi, fwd(self.domain, f32(204.0) / curr_gain))
                 self.frozen_gain = curr_gain
                 self.frozen = True
             ylut = self.frozen_ylut; curr_gain = self.frozen_gain
         else:
             if self.last_gain == 0.0:
                 self.index = 0; self.last_gain = curr_gain
-            self.prev_gain[self.index] = curr_gain
-            self.index = (self.index + 1) % self.avg_window
+            if not degenerate:
+                self.prev_gain[self.index] = curr_gain
+                self.index = (self.index + 1) % self.avg_window
             avail = self.prev_gain != 0.0
             avg = f32(self.prev_gain[avail].sum() / f32(avail.sum()))
             if abs(avg - self.last_gain) / self.last_gain * 100.0 > f32(self.response):
@@ -294,7 +307,7 @@ class AuroraRef:
                 self.last_gain = avg
             curr_gain = self.last_gain
             ylut = build_ylut(hist, self.gauss, curr_gain, protect_on,
-                              self.lum_hi, self.lum_204 / curr_gain)
+                              self.lum_hi, fwd(self.domain, f32(204.0) / curr_gain))
         # 6. estimator
         if self.engine == 'guided':
             lmap = guided_filter(est_in, w, h, self.radius)
@@ -389,7 +402,7 @@ def compare(name, w, h, n, ref, tol, fmt='yv12'):
     Ys, Us, Vs = load_src(name, w, h, n, fmt)
     worst = 0
     for fr in range(n):
-        Yo, Uo, Vo = ref.process(Ys[fr].copy(), Us[fr].copy(), Vs[fr].copy())
+        Yo, Uo, Vo = ref.process(Ys[fr].copy(), Us[fr].copy(), Vs[fr].copy(), fr=fr)
         dy = np.abs(Yg[fr].astype(int) - Yo.astype(int)).max()
         du = np.abs(Ug[fr].astype(int) - Uo.astype(int)).max()
         dv = np.abs(Vg[fr].astype(int) - Vo.astype(int)).max()
@@ -420,4 +433,7 @@ if __name__ == '__main__':
     ok &= compare('cb_clahe', 64, 48, 3, AuroraRef(64, 48, engine='clahe'), tol=2)
     ok &= compare('cb_lin', 64, 48, 3, AuroraRef(64, 48, domain='linear'), tol=3)
     ok &= compare('cb_tpg', 64, 48, 6, AuroraRef(64, 48, pg_smooth=0.5, scene_cut=0.3), tol=2)
+    # protect taper in the LOG domain on bright content (regression: limit
+    # must be computed as fwd(204/gain), not fwd(204)/gain)
+    ok &= compare('cb_prot', 64, 48, 3, AuroraRef(64, 48, domain='log', protect=1), tol=2)
     print('AURORA CROSS-CHECK', 'PASSED' if ok else 'FAILED')

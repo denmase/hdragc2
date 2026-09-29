@@ -358,6 +358,21 @@ int main(void) {
         avs_release_value(out); avs_release_value(spliced);
     }
 
+    // 16) protect taper in log domain on BRIGHT content
+    {
+        AVS_Value yuv = make_cb(64, 48, 90, 3);
+        render(yuv, "/tmp/host_cb_prot_src.raw");
+        AVS_Value args[3];
+        const char *nm[] = { NULL, "domain", "protect", NULL };
+        args[0] = yuv;
+        args[1] = avs_new_value_string("log");
+        args[2] = avs_new_value_int(1);
+        AVS_Value out = avs_invoke(env, "Aurora", avs_new_value_array(args, 3), nm);
+        if (avs_is_error(out)) die("Aurora cb_prot", out);
+        render(out, "/tmp/host_cb_prot.raw");
+        avs_release_value(out); avs_release_value(yuv);
+    }
+
     avs_delete_script_environment(env);
     fprintf(stderr, "ALL OK\n");
     return 0;
