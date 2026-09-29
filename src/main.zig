@@ -15,42 +15,14 @@ const avs = @import("avisynth");
 const c = avs.c;
 
 const allocator = std.heap.c_allocator;
+const common = @import("common.zig");
+const aurora = @import("aurora.zig");
 
 var api: *const avs.AvsApi = undefined;
 
-// ---------------------------------------------------------------------------
-// Ported helper: the original author's custom round().
-// (int)val in C truncates toward zero; @intFromFloat does the same.
-// Note: behaves "oddly" for negative input — preserved 1:1 from the original.
-// ---------------------------------------------------------------------------
-fn roundOrig(val: f32) i32 {
-    var r: i32 = @intFromFloat(val);
-    if (@as(i32, @intFromFloat(val - 0.5)) == r) r += 1;
-    return r;
-}
+const roundOrig = common.roundOrig;
+const weights = common.weights;
 
-// ---------------------------------------------------------------------------
-// Edge-aware weight table, built at comptime (256 KB in .rodata).
-// The original computed this at runtime in the constructor:
-//   weights[i][j] = expf(-powf(fabsf((logf(i+.1)-logf(j+.1))/logf(5)), 25))
-// DEVIATION #1: the C source calls abs() on a float (VC6 prototype: int),
-// which is compiler-dependent and almost certainly unintended. The port uses
-// the mathematically intended float absolute value.
-// ---------------------------------------------------------------------------
-const weights = blk: {
-    @setEvalBranchQuota(10_000_000);
-    var w: [256][256]f32 = undefined;
-    const log5 = @log(@as(f32, 5.0));
-    for (0..256) |i| {
-        const li = @log(@as(f32, @floatFromInt(i)) + 0.1);
-        for (0..256) |j| {
-            const lj = @log(@as(f32, @floatFromInt(j)) + 0.1);
-            const t = @abs(li - lj) / log5;
-            w[i][j] = @exp(-std.math.pow(f32, t, 25.0));
-        }
-    }
-    break :blk w;
-};
 
 const RLUM: f32 = 0.3086;
 const GLUM: f32 = 0.6094;
@@ -206,21 +178,7 @@ fn hdragcCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     @memset(d.prev_gain, 0.0);
 
     // ---- gauss table (identical to the original constructor) ----
-    {
-        const length: f32 = 4.0;
-        const pi: f32 = 3.141593;
-        const alpha: f32 = 1.0 / (d.sigma * @sqrt(2.0 * pi));
-        const mu: f32 = (-@as(f32, @floatFromInt(avg_lum)) + 128.0) * (2.0 * length) / 256.0;
-        var suma: f32 = 0.0;
-        for (0..256) |i| {
-            const x: f32 = length - 2.0 * length * @as(f32, @floatFromInt(i)) / 255.0;
-            const dx = x - mu;
-            const prob = alpha * @exp(-(dx * dx) / (2.0 * d.sigma * d.sigma));
-            suma += prob;
-            d.gauss[i] = suma * @as(f32, @floatFromInt(pixels));
-        }
-        for (0..256) |i| d.gauss[i] /= suma;
-    }
+    common.buildGauss(&d.gauss, avg_lum, d.sigma, pixels);
 
     // ---- circle matrix. ORIGINAL BUG (preserved): the original loop
     // `for (x = -circle; x < circle; x++)` is asymmetric (skips +circle).
@@ -592,5 +550,7 @@ export fn avisynth_c_plugin_init(env: ?*c.AVS_ScriptEnvironment) callconv(.c) [*
         null,
     );
 
-    return "HDRAGC 0.1.5 plugin (Zig 1:1 port)";
+    aurora.register(e, api);
+
+    return "HDRAGC 0.1.5 (Zig 1:1 port) + Aurora";
 }

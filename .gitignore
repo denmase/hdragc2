@@ -5,3 +5,5 @@ zig-cache/
 *.obj
 *.exe
 *.pdb
+*.pyc
+__pycache__/

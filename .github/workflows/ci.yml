@@ -105,19 +105,21 @@ jobs:
       - name: Build plugin
         run: zig build -Doptimize=ReleaseFast
 
-      # AviSynth+ publishes no official Linux binaries — build AvsCore from source.
+      # AviSynth+ publishes no official Linux binaries — build AvsCore from
+      # source. IMPORTANT: build from the vendored, pinned source tree
+      # (vendor/avisynthplus) so the library exactly matches the headers the
+      # plugin was compiled against; a version mismatch crashes avs_invoke.
       - name: Cache AviSynth+ build
         id: cache-avs
         uses: actions/cache@v4
         with:
           path: /tmp/avsbuild/avs_core
-          key: avsplus-v3.7.5-avs-core
+          key: avsplus-vendored-avs-core
 
-      - name: Build AviSynth+ from source
+      - name: Build AviSynth+ from vendored source
         if: steps.cache-avs.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch v3.7.5 https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
-          cmake -S /tmp/AviSynthPlus -B /tmp/avsbuild -DCMAKE_BUILD_TYPE=Release
+          cmake -S vendor/avisynthplus -B /tmp/avsbuild -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/avsbuild --target AvsCore -j$(nproc)
 
       - name: Build host test

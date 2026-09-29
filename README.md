@@ -5,8 +5,44 @@ open-source release) to an **AviSynth+ 64-bit plugin written in Zig**, using the
 [`dnjulek/avisynth-zig`](https://github.com/dnjulek/avisynth-zig) module
 (AviSynth+ C API V8+, dynamic loading).
 
-A separate `HDRAGC187()` function replicating the documented v1.8.7 parameter
-set is planned — see `hdragc2-desain.md` for the design notes.
+## Aurora — the next-generation function
+
+`Aurora(clip, ...)` is a modern reconstruction inspired by the documented
+HDRAGC v1.8.7 parameter set (the original is closed-source; semantics were
+reconstructed from the archived documentation). Improvements over the 0.1.5
+port, as designed in `hdragc2-desain.md`:
+
+* **YUV (YV12) processing** — independent luma/chroma handling; chroma
+  saturation is a clean scale around neutral 128 (v1.8.7 removed RGB32).
+* **Pluggable local estimators** (`engine`): `"guided"` (self-guided filter,
+  default), `"legacy"` (0.1.5 separable kernel), `"clahe"`.
+* 1.8.7 parameters: `protect`, `passes`, `shift`, `shadows`, `shift_u/v`,
+  `corrector`, `reducer`, `black_clip`, `freezer` — see the table below.
+
+| parameter | default | source / meaning |
+|---|---|---|
+| avg_lum / max_gain / min_gain / coef_gain | 128 / 3.0 / 1.0 / 1.0 | as in 0.1.5 |
+| max_sat / min_sat / coef_sat | **9.0 / 0.0 / 1.0** | 1.8.7 defaults (YUV chroma scale) |
+| avg_window | -1 (= one second) | temporal window, frames |
+| response | 100 | per-frame gain change limiter, % |
+| mode | 2 | picks the default engine when `engine` is not given (1=legacy, 2=guided) |
+| engine | from mode | "guided" / "legacy" / "clahe" |
+| protect | 2 | 0=off, 1=on, 2=auto (on when a near-white pixel exists) |
+| passes | 4 | legacy-estimator iterations (doc: "mode 1 only") |
+| shift | 0 | fixed luma pre-shift |
+| shadows | true | extra shadow-region enhancement curve |
+| shift_u / shift_v | 0 | constant chroma offsets (white balance) |
+| corrector | 0.0 | 1=no shaping; lower withholds gain from bright pixels |
+| reducer | 0.5 | gain-map spatial smoothing, 0..2 |
+| black_clip | 0.0 | fraction of darkest pixels pinned to black |
+| freezer | -1 | >=0: freeze statistics from the first evaluated frame |
+| radius / clip_limit / tiles | 7 / 2.0 / 8 | Aurora tuning (estimator radius, CLAHE clip & grid) |
+
+Where the 1.8.7 documentation was ambiguous, the chosen interpretation is
+marked [interp] in `src/aurora.zig`. `corrector_mode` is undocumented in the
+original docs and not implemented.
+
+Input: **YV12 8-bit** in v1 (`Aurora(ConvertToYV12(src))`).
 
 ## Build
 
@@ -82,6 +118,9 @@ from source, C host test + independent Python reference implementation):
 | dark (defaults, 8 frames, temporal) | 0 | 0.00000 |
 | dark_m0 (mode=0, circle=5, avg_window=4, response=50) | 0 | 0.00000 |
 | bright (gain approx 1) | 0 | 0.00000 |
+| Aurora default (guided engine, temporal) | 2 | within tolerance |
+| Aurora engine=clahe | 0 | 0.00000 (exact) |
+| Aurora freezer+corrector+reducer+black_clip+shift | 0 | 0.00000 (exact) |
 
 Plugin output is **pixel-per-pixel identical** to the Python reference on all
 four scenarios, in both Debug and ReleaseFast builds. Comparison logic in
@@ -99,6 +138,7 @@ gcc -O2 -I vendor/avisynthplus/avs_core/include test/host.c \
     -o /tmp/host -L/path/to/avs_core -lavisynth -Wl,-rpath,/path/to/avs_core
 LD_LIBRARY_PATH=/path/to/avs_core /tmp/host
 python3 test/reference.py
+python3 test/reference_aurora.py
 
 REM Windows smoke test (AviSynth+ installed):
 test\test.bat
