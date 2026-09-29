@@ -107,28 +107,31 @@ pub fn boxBlur(src: []const f32, dst: []f32, w: usize, h: usize, r: usize) void 
 /// optional highlight tapering) — the YLUT stage shared by Aurora's engines.
 /// Identical math to the verified HDRAGC 0.1.5 get_frame loop; `protect_on`
 /// enables the "204/gain" taper that eases the slope to gain 1.0 at luma 235.
-pub fn buildYlut(ylut: *[256]f32, hist: *const [256]u32, gauss: *const [256]f32, curr_gain: f32, protect_on: bool) void {
+pub fn buildYlut(ylut: *[256]f32, hist: *const [256]u32, gauss: *const [256]f32, curr_gain: f32, protect_on: bool, lum_hi: f32, limit: f32) void {
     var acc: u32 = 0;
     var last_y: f32 = 0.0;
     var gauss_i: usize = 0;
-    const limit: f32 = 204.0 / curr_gain;
     for (0..256) |i| {
         acc += hist[i];
         // Walk the gauss CDF to the bin whose cumulative count matches the
         // source histogram's cumulative count -> classic histogram matching.
-        while (gauss_i < 255 and @as(f32, @floatFromInt(acc)) > gauss[gauss_i])
+        // '>=' (not '>'): the f32 cumulative sum plateaus once the remaining
+        // probabilities fall below ULP, making gauss[i] == pixel count
+        // exactly for a range of i; '>' then halts the walk early and leaks
+        // an un-clamped new_lum. '>=' lets the clamp handle the plateau.
+        while (gauss_i < 255 and @as(f32, @floatFromInt(acc)) >= gauss[gauss_i])
             gauss_i += 1;
         var new_lum: f32 = @floatFromInt(gauss_i);
         var max_lum: f32 = last_y;
-        if (last_y >= 235.0) {
+        if (last_y >= lum_hi) {
             max_lum += 1.0; // at white: only allow a single gray step
         } else if (!protect_on or @as(f32, @floatFromInt(i)) < limit) {
             max_lum += curr_gain; // full gain below the protect threshold
         } else {
             // Above the threshold, taper the added slope with a sqrt curve
-            // so highlights approach gain 1.0 at luma 235 instead of clipping.
-            const t = (@as(f32, @floatFromInt(i)) - limit) / (235.0 - limit)
-                * (last_y - limit) / (235.0 - limit);
+            // so highlights approach gain 1.0 at lum_hi instead of clipping.
+            const t = (@as(f32, @floatFromInt(i)) - limit) / (lum_hi - limit)
+                * (last_y - limit) / (lum_hi - limit);
             max_lum += curr_gain - @sqrt(t) * (curr_gain - 1.0);
         }
         if (new_lum > max_lum) new_lum = max_lum;
@@ -272,4 +275,64 @@ pub fn clahe(src: []const u8, dst: []f32, w: usize, h: usize, tiles: usize, clip
             dst[y * w + x] = top * (1.0 - wy) + bot * wy;
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Working-domain transforms for Aurora's `domain` parameter, implemented as
+// 256-entry LUTs shared verbatim with test/reference_aurora.py (the tables
+// under src/tables/ are the single source of truth). Why LUTs instead of
+// powf/logf at runtime:
+//   * deterministic and BIT-IDENTICAL across Zig and the Python reference
+//     (libm pow() differs by ULPs between implementations, which shifted
+//     histogram bins and produced a 10-level output diff in domain=linear);
+//   * faster: one rounding + one lookup per call.
+// Indexing: round-to-nearest (half away from zero, but inputs are >= 0),
+// clamped to 0..255 — mirrored exactly by the reference.
+//   gamma  : identity (no table)
+//   linear : sRGB EOTF, fwd = decode, inv = encode
+//   log    : 255*ln(1+v)/ln(256)
+// ---------------------------------------------------------------------------
+pub const Domain = enum { gamma, linear, log };
+
+fn parseDomainTable(comptime text: []const u8) [256]f32 {
+    @setEvalBranchQuota(100_000);
+    var tbl: [256]f32 = undefined;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var i: usize = 0;
+    while (it.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len == 0) continue;
+        tbl[i] = std.fmt.parseFloat(f32, t) catch @panic("bad domain table");
+        i += 1;
+    }
+    if (i != 256) @panic("domain table must have 256 entries");
+    return tbl;
+}
+
+const linear_fwd_tbl = parseDomainTable(@embedFile("tables/linear_fwd.txt"));
+const linear_inv_tbl = parseDomainTable(@embedFile("tables/linear_inv.txt"));
+const log_fwd_tbl = parseDomainTable(@embedFile("tables/log_fwd.txt"));
+const log_inv_tbl = parseDomainTable(@embedFile("tables/log_inv.txt"));
+
+fn domainIdx(v: f32) usize {
+    const r = @round(v);
+    const cl = std.math.clamp(r, 0.0, 255.0);
+    return @intFromFloat(cl);
+}
+
+pub fn fwd(d: Domain, v: f32) f32 {
+    return switch (d) {
+        .gamma => v,
+        .linear => linear_fwd_tbl[domainIdx(v)],
+        .log => log_fwd_tbl[domainIdx(v)],
+    };
+}
+
+pub fn inv(d: Domain, v: f32) f32 {
+    return switch (d) {
+        .gamma => v,
+        .linear => linear_inv_tbl[domainIdx(v)],
+        .log => log_inv_tbl[domainIdx(v)],
+    };
 }

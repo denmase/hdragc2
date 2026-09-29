@@ -42,7 +42,32 @@ Where the 1.8.7 documentation was ambiguous, the chosen interpretation is
 marked [interp] in `src/aurora.zig`. `corrector_mode` is undocumented in the
 original docs and not implemented.
 
-Input: **YV12 8-bit** in v1 (`Aurora(ConvertToYV12(src))`).
+Input: **YV12 or YUV444P 8-bit** (`Aurora(ConvertToYV12(src))`).
+
+### Aurora usage examples
+
+```avisynth
+LoadCPlugin("path\to\hdragc2.dll")
+
+# 1. Basic: automatic shadow lift on dark footage (defaults)
+a = Aurora(ConvertToYV12(src))
+
+# 2. Cinematic: protect highlights, log domain for natural midtones,
+#    tamed saturation (1.8.7's max_sat=9.0 is very aggressive)
+b = Aurora(src_yv12, radius=9, corrector=0.85, protect=1,
+           reducer=0.8, domain="log", max_sat=3.0)
+
+# 3. Noisy footage with scene cuts: temporal gain-map smoothing with
+#    scene-change detection resetting temporal state
+c = Aurora(src_yv12, pg_smooth=0.5, scene_cut=0.3, avg_window=-1, response=30)
+
+# 4. White balance + CLAHE engine instead of the guided filter
+d = Aurora(src_yv12, engine="clahe", clip_limit=1.5, tiles=8,
+           shift_u=2, shift_v=-1)
+
+# 5. Compare everything on a split screen
+StackHorizontal(a, b, c, d)
+```
 
 ## Build
 
@@ -109,22 +134,26 @@ Parameters (defaults per the 0.1.5 source):
 
 ## Verification status
 
-**NUMERICALLY VERIFIED** (2026-09-29, Linux sandbox, AviSynth+ 3.7.5 built
-from source, C host test + independent Python reference implementation):
+**NUMERICALLY VERIFIED — 15/15 scenarios, pixel-exact (max_abs_diff = 0) in
+both Debug and ReleaseFast builds** (2026-09-29, Linux sandbox, AviSynth+
+built from the vendored pinned source, C host test rendering synthetic clips
++ SMPTE ColorBars, independent Python reference implementations in
+`test/reference.py` and `test/reference_aurora.py`).
 
-| Scenario | max_abs_diff | mean |
+| Group | Scenarios | Result |
 |---|---|---|
-| identity (max_gain=1) | 0 | 0.00000 |
-| dark (defaults, 8 frames, temporal) | 0 | 0.00000 |
-| dark_m0 (mode=0, circle=5, avg_window=4, response=50) | 0 | 0.00000 |
-| bright (gain approx 1) | 0 | 0.00000 |
-| Aurora default (guided engine, temporal) | 2 | within tolerance |
-| Aurora engine=clahe | 0 | 0.00000 (exact) |
-| Aurora freezer+corrector+reducer+black_clip+shift | 0 | 0.00000 (exact) |
+| HDRAGC 0.1.5 | identity, dark, dark mode=0+temporal, bright | exact 0 |
+| Aurora engines | guided default, legacy, clahe (flat + ColorBars) | exact 0 |
+| Aurora domain | gamma, linear, log (LUT-based transforms) | exact 0 |
+| Aurora temporal | avg_window/response ring buffer, freezer, pg_smooth IIR, scene_cut | exact 0 |
+| Aurora formats | YV12, YUV444P | exact 0 |
 
-Plugin output is **pixel-per-pixel identical** to the Python reference on all
-four scenarios, in both Debug and ReleaseFast builds. Comparison logic in
-`test/reference.py`.
+Notes learned during verification (baked into the test design):
+* The reference must run on the plugin's *input* (dumped src), never on its
+  output — re-processing already-lifted frames is near-idempotent and hides
+  bugs (circular-verification trap).
+* Flat-color clips cannot distinguish engines/configurations; SMPTE
+  ColorBars is the minimum non-uniform test pattern.
 
 Note on running the host test: the Asd-g dynamic loader performs
 `dlopen("libavisynth.so")` itself, so the host must be run with

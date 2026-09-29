@@ -24,3 +24,30 @@
   AviSynthPlus@cfdaf8e); a header/library version mismatch crashes
   avs_invoke. The CI test job builds the library from vendor/avisynthplus
   for exactly this reason.
+
+## 0.2.0 (2026-09-29)
+
+### Added — Aurora()
+- `Aurora()`: full reconstruction of the documented HDRAGC v1.8.7 parameter
+  set in YUV: protect, passes, shift, shadows, shift_u/v, corrector, reducer,
+  black_clip, freezer — plus next-generation improvements:
+  - engines: "guided" (self-guided filter, default), "legacy" (0.1.5
+    separable kernel), "clahe" (contrast-limited adaptive histogram
+    equalization);
+  - `domain`: "gamma" | "linear" | "log" via shared 256-entry LUTs
+    (src/tables/, bit-identical with the reference implementation);
+  - temporal stability: per-pixel gain-map IIR (`pg_smooth`) with automatic
+    scene-cut detection (`scene_cut`) resetting all temporal state;
+  - YUV444P input support alongside YV12.
+### Fixed
+- Out-of-bounds AVS_Value reads for omitted optional args (avs_array_size
+  returns the DECLARED parameter count with padded placeholders — always
+  type-check values before converting).
+- Off-by-one argument indices from `mode` onward (signature contains
+  `[debug]b` at slot 10).
+- f32 plateau in the gauss CDF walk halting histogram matching early
+  (comparison is now `>=`, letting the clamp handle exact-equality plateaus).
+- Debug-build-only diagnostics removed; no functional change.
+### Verification
+- 15/15 scenarios pixel-exact (max_abs_diff = 0) vs independent Python
+  references, Debug AND ReleaseFast, including SMPTE ColorBars content.

@@ -75,6 +75,10 @@ const HdrAgcData = struct {
 };
 
 fn argDefined(args: c.AVS_Value, i: usize) bool {
+    // Bounds-check against the ACTUAL argument count first: reading an
+    // AVS_Value array beyond its size is undefined behavior (it crashed
+    // non-deterministically when optional trailing args were omitted).
+    if (@as(usize, @intCast(c.avs_array_size(args))) <= i) return false;
     return c.avs_defined(c.avs_array_elt(args, @intCast(i))) != 0;
 }
 fn argInt(args: c.AVS_Value, i: usize) i64 {
@@ -518,8 +522,12 @@ fn hdragcGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
     return dst;
 }
 
-const REQUIRED_INTERFACE_VERSION: c_int = avs.INTERFACE_VERSION;
-const REQUIRED_BUGFIX_VERSION: c_int = avs.INTERFACE_BUGFIX_VERSION;
+// C API interface versions to try, newest first. Official AviSynth+ releases
+// ship a lower C API version than master builds; requesting a version the
+// host does not provide fails inside getApi, and the C-plugin init protocol
+// has no error channel (a failed init just registers nothing). Descending
+// retry makes the plugin work on any AviSynth+ >= 3.6 (C API V8+).
+const candidate_interface_versions = [_]c_int{ 12, 11, 10, 9, 8 };
 
 const required_functions = [_][*:0]const u8{
     "avs_add_function",
@@ -539,8 +547,18 @@ const required_functions = [_][*:0]const u8{
 export fn avisynth_c_plugin_init(env: ?*c.AVS_ScriptEnvironment) callconv(.c) [*:0]const u8 {
     const e = env orelse return "HDRAGC: plugin init called without a script environment.";
 
-    api = avs.getApi(e, REQUIRED_INTERFACE_VERSION, REQUIRED_BUGFIX_VERSION, &required_functions) catch
+    resolved: {
+        // Bugfix numbers can also differ between master and releases; try
+        // the header's value first, then 0, for each interface version.
+        const bugfix_candidates = [_]c_int{ avs.INTERFACE_BUGFIX_VERSION, 0 };
+        for (candidate_interface_versions) |ver| {
+            for (bugfix_candidates) |bf| {
+                api = avs.getApi(e, ver, bf, &required_functions) catch continue;
+                break :resolved;
+            }
+        }
         return avs.getLastError().ptr;
+    }
 
     _ = api.avs_add_function.?(
         e,
