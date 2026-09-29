@@ -1,0 +1,25 @@
+.{
+    .name = .avisynth,
+    .version = "0.1.0",
+    .fingerprint = 0x3b1602740b7c8aa3,
+    .minimum_zig_version = "0.16.0",
+
+    .dependencies = .{
+        .avs_loader = .{
+            .url = "git+https://github.com/Asd-g/avisynthplus-c-api-dynamic-loader.git#7fe41b35c0c397592936f51f421904f340d85566",
+            .hash = "N-V-__8AAGhBAQC228VPwogQ1C8UZlj-KHqemYfclxEplva7",
+        },
+        .avisynthplus = .{
+            .url = "git+https://github.com/AviSynth/AviSynthPlus.git#cfdaf8eb8a0a05b14edf7e73736df382bb876592",
+            .hash = "N-V-__8AABk9ewGk74d67_K3dvCrAzIrHAmB8YJIHXdyBaxR",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "LICENSE",
+    },
+}

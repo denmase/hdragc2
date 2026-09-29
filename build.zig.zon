@@ -1,0 +1,14 @@
+.{
+    .name = .hdragc2,
+    .version = "0.1.5-zig",
+    .fingerprint = 0x7d470738b962a2c1,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "vendor",
+    },
+    .dependencies = .{},
+}

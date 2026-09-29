@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    name: Build plugin (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      # Dependencies are vendored under vendor/ — no network fetch needed.
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdragc2-windows-x64
+          path: zig-out/bin/hdragc2.dll
+
+      - name: Upload artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdragc2-linux-x64
+          path: zig-out/lib/libhdragc2.so
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdragc2-macos-universal
+          path: zig-out/lib/libhdragc2.dylib
+
+  test-linux:
+    name: Numerical cross-check (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Build plugin
+        run: zig build -Doptimize=ReleaseFast
+
+      # AviSynth+ has no official Linux binaries — build AvsCore from source.
+      - name: Cache AviSynth+ build
+        id: cache-avs
+        uses: actions/cache@v4
+        with:
+          path: /tmp/avsbuild/avs_core
+          key: avsplus-v3.7.5-${{ runner.os }}
+
+      - name: Build AviSynth+ from source
+        if: steps.cache-avs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v3.7.5 https://github.com/AviSynth/AviSynthPlus.git /tmp/AviSynthPlus
+          cmake -S /tmp/AviSynthPlus -B /tmp/avsbuild -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/avsbuild --target AvsCore -j$(nproc)
+
+      - name: Build host test
+        run: |
+          cp zig-out/lib/libhdragc2.so /tmp/libhdragc2.so
+          gcc -O2 -I vendor/avisynthplus/avs_core/include test/host.c               -o /tmp/host -L/tmp/avsbuild/avs_core -lavisynth               -Wl,-rpath,/tmp/avsbuild/avs_core
+
+      - name: Run host test
+        run: LD_LIBRARY_PATH=/tmp/avsbuild/avs_core /tmp/host
+
+      - name: Cross-check against Python reference
+        run: |
+          pip install numpy
+          python3 test/reference.py

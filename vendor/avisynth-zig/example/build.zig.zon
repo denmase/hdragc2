@@ -1,0 +1,14 @@
+.{
+    .name = .invert_example,
+    .version = "1.0.0",
+    .paths = .{""},
+    .fingerprint = 0xcda4a3d94b7e2c15,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // zig fetch --save git+https://github.com/dnjulek/avisynth-zig.git
+        .avisynth = .{
+            .url = "git+https://github.com/dnjulek/avisynth-zig.git#6002c8f4a5fc7a37faf0206783ba00fd2434b7e3",
+            .hash = "avisynth-0.1.0-o4p8C3lQAABLWWTdMfu_cYztRDEshJiwz_wLwJpZhbtm",
+        },
+    },
+}
