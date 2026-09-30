@@ -48,6 +48,7 @@ const AuroraData = struct {
     mode: i32,
     engine: Engine,
     protect: i32, // 0=off, 1=on, 2=auto
+    protect_above: f32, // luma (gamma-domain) where the protect taper starts (doc: 204)
     passes: i32, // legacy-engine iterations
     shift: i32, // fixed luma pre-shift
     shadows: bool,
@@ -192,6 +193,7 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
         .mode = mode,
         .engine = parseEngine(args, mode),
         .protect = argInt(args, 13, 2),
+        .protect_above = argFloat(args, 29, 204.0),
         .passes = argInt(args, 14, 4),
         .shift = argInt(args, 15, 0),
         .shadows = argBool(args, 16, true),
@@ -506,7 +508,7 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
     };
     if (d.freezer >= 0) {
         if (!d.frozen) {
-            common.buildYlut(&d.frozen_ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, 204.0 / curr_gain));
+            common.buildYlut(&d.frozen_ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, d.protect_above / curr_gain));
             d.frozen_gain = curr_gain;
             d.frozen = true;
         }
@@ -543,7 +545,7 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
         }
         }
         curr_gain = d.last_gain;
-        common.buildYlut(&ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, 204.0 / curr_gain));
+        common.buildYlut(&ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, d.protect_above / curr_gain));
     }
 
     // ---- 6-7. local estimator + gain map + corrector + reducer ----
@@ -655,7 +657,7 @@ pub fn register(env: *c.AVS_ScriptEnvironment, avs_api: *const avs.AvsApi) void 
         "c[avg_lum]i[max_gain]f[min_gain]f[coef_gain]f[max_sat]f[min_sat]f[coef_sat]f" ++
             "[avg_window]i[response]i[debug]b[mode]i[engine]s[protect]i[passes]i[shift]i" ++
             "[shadows]b[shift_u]i[shift_v]i[corrector]f[reducer]f[black_clip]f[freezer]i" ++
-            "[radius]i[clip_limit]f[tiles]i[pg_smooth]f[scene_cut]f[domain]s",
+            "[radius]i[clip_limit]f[tiles]i[pg_smooth]f[scene_cut]f[domain]s[protect_above]f",
         &auroraCreate,
         null,
     );

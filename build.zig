@@ -1,7 +1,15 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) !void {
-    const target = b.standardTargetOptions(.{});
+    // Default to the GENERIC x86-64 baseline (SSE2 only) so released
+    // binaries run on any x86-64 CPU. Native-CPU builds (e.g. on CI
+    // runners with AVX-512) crash with "Illegal instruction" on older
+    // hardware. Override with -Dcpu=native when benchmarking locally.
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64 },
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
 
     // ---- modul "avisynth" (vendor avisynth-zig) ----

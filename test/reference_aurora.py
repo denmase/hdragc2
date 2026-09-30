@@ -193,7 +193,7 @@ class AuroraRef:
                  avg_window=-1, response=100, protect=2, passes=4, shift=0,
                  shadows=True, shift_u=0, shift_v=0, corrector=0.0, reducer=0.5,
                  black_clip=0.0, freezer=-1, radius=7, clip_limit=2.0, tiles=8,
-                 pg_smooth=0.0, scene_cut=0.0, fps=25):
+                 pg_smooth=0.0, scene_cut=0.0, protect_above=204.0, fps=25):
         self.w, self.h = w, h
         self.engine, self.fmt, self.domain = engine, fmt, domain
         self.avg_lum = avg_lum
@@ -207,6 +207,7 @@ class AuroraRef:
         self.radius = max(1, radius); self.clip_limit = f32(clip_limit)
         self.tiles = max(1, tiles)
         self.pg_smooth = min(max(f32(pg_smooth), f32(0.0)), f32(0.95))
+        self.protect_above = f32(protect_above)
         self.scene_cut = f32(scene_cut)
         if avg_window == -1: avg_window = int(np.ceil(f32(fps)))
         self.avg_window = max(1, avg_window)
@@ -286,7 +287,7 @@ class AuroraRef:
         if self.freezer >= 0:
             if not self.frozen:
                 self.frozen_ylut = build_ylut(hist, self.gauss, curr_gain, protect_on,
-                                              self.lum_hi, fwd(self.domain, f32(204.0) / curr_gain))
+                                              self.lum_hi, fwd(self.domain, f32(self.protect_above) / curr_gain))
                 self.frozen_gain = curr_gain
                 self.frozen = True
             ylut = self.frozen_ylut; curr_gain = self.frozen_gain
@@ -307,7 +308,7 @@ class AuroraRef:
                 self.last_gain = avg
             curr_gain = self.last_gain
             ylut = build_ylut(hist, self.gauss, curr_gain, protect_on,
-                              self.lum_hi, fwd(self.domain, f32(204.0) / curr_gain))
+                              self.lum_hi, fwd(self.domain, f32(self.protect_above) / curr_gain))
         # 6. estimator
         if self.engine == 'guided':
             lmap = guided_filter(est_in, w, h, self.radius)
@@ -435,5 +436,5 @@ if __name__ == '__main__':
     ok &= compare('cb_tpg', 64, 48, 6, AuroraRef(64, 48, pg_smooth=0.5, scene_cut=0.3), tol=2)
     # protect taper in the LOG domain on bright content (regression: limit
     # must be computed as fwd(204/gain), not fwd(204)/gain)
-    ok &= compare('cb_prot', 64, 48, 3, AuroraRef(64, 48, domain='log', protect=1), tol=2)
+    ok &= compare('cb_prot', 64, 48, 3, AuroraRef(64, 48, domain='log', protect=1, protect_above=160.0), tol=2)
     print('AURORA CROSS-CHECK', 'PASSED' if ok else 'FAILED')

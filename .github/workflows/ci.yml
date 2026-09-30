@@ -61,7 +61,16 @@ jobs:
         run: echo "${{ github.workspace }}/zig-tool" >> "$GITHUB_PATH"
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dcpu=baseline
+
+      - name: Verify generic-CPU baseline (no AVX in artifact)
+        if: runner.os != 'macOS'
+        run: |
+          LIB=$(ls zig-out/bin/* zig-out/lib/* 2>/dev/null | head -1)
+          if objdump -d "$LIB" 2>/dev/null | grep -qE "zmm|ymm|vzeroupper|vbroadcast"; then
+            echo "ERROR: $LIB contains AVX instructions (not generic x86-64 baseline)"; exit 1
+          fi
+          echo "baseline OK: $LIB"
 
       - name: Upload artifact (Windows)
         if: matrix.ext == 'zip'
@@ -103,7 +112,7 @@ jobs:
         run: echo "${{ github.workspace }}/zig-tool" >> "$GITHUB_PATH"
 
       - name: Build plugin
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dcpu=baseline
 
       # AviSynth+ publishes no official Linux binaries — build AvsCore from
       # source. IMPORTANT: build from the vendored, pinned source tree
