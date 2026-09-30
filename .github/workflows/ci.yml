@@ -65,12 +65,19 @@ jobs:
 
       - name: Verify generic-CPU baseline (no AVX in artifact)
         if: runner.os != 'macOS'
+        shell: bash   # default shell on Windows runners is pwsh - this step is bash
         run: |
+          set -u
           LIB=$(ls zig-out/bin/* zig-out/lib/* 2>/dev/null | head -1)
-          if objdump -d "$LIB" 2>/dev/null | grep -qE "zmm|ymm|vzeroupper|vbroadcast"; then
+          OD=$(command -v objdump || command -v llvm-objdump || true)
+          [ -z "$OD" ] && [ -x "/c/Program Files/LLVM/bin/llvm-objdump.exe" ] && OD="/c/Program Files/LLVM/bin/llvm-objdump.exe"
+          if [ -z "$OD" ]; then
+            echo "WARN: no objdump available on this runner, baseline check skipped"
+          elif "$OD" -d "$LIB" 2>/dev/null | grep -qE "zmm|ymm|vzeroupper|vbroadcast"; then
             echo "ERROR: $LIB contains AVX instructions (not generic x86-64 baseline)"; exit 1
+          else
+            echo "baseline OK: $LIB ($OD)"
           fi
-          echo "baseline OK: $LIB"
 
       - name: Upload artifact (Windows)
         if: matrix.ext == 'zip'
