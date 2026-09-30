@@ -158,3 +158,4 @@ jobs:
         run: |
           pip install numpy
           python3 test/reference.py
+          python3 test/reference_aurora.py

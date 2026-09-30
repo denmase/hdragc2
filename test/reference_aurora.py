@@ -5,6 +5,7 @@ the C host (host_aurora_*_src.raw) so no colorspace reimplementation is
 needed. Supports YV12 and YUV444P, domain gamma/linear/log, temporal gain-map
 IIR (pg_smooth) and scene-cut detection (scene_cut)."""
 import os
+import sys
 import numpy as np
 OUT = os.environ.get('HDLT_OUT', '/tmp/hdlt')
 
@@ -456,3 +457,4 @@ if __name__ == '__main__':
     # contrast restore (gamma-domain, protected dark floor)
     ok &= compare('cb_ctr', 64, 48, 3, AuroraRef(64, 48, contrast=0.8), tol=2)
     print('AURORA CROSS-CHECK', 'PASSED' if ok else 'FAILED')
+    sys.exit(0 if ok else 1)

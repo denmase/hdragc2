@@ -116,6 +116,16 @@ static AVS_Value make_clip(int w, int h, int len, int color) {
     return v;
 }
 
+// flat RGB32 BlankClip converted to YV12
+static AVS_Value make_yv12(int w, int h, int len, int color) {
+    AVS_Value rgb = make_clip(w, h, len, color);
+    AVS_Value args[1] = { rgb };
+    AVS_Value yuv = avs_invoke(env, "ConvertToYV12", avs_new_value_array(args, 1), NULL);
+    avs_release_value(rgb);
+    if (avs_is_error(yuv)) die("ConvertToYV12", yuv);
+    return yuv;
+}
+
 // HDRAGC with a list of (name, float value) named args
 // Generic named-arg invoker; kinds: 'i'=int 'f'=float 's'=string
 static AVS_Value apply_named(AVS_Value src, const char *name, int n_extra,
@@ -150,6 +160,109 @@ int main(void) {
     if (avs_is_error(r)) die("LoadCPlugin", r);
     fprintf(stderr, "LoadCPlugin returned: %s\n", avs_as_string(r));
     fprintf(stderr, "HDRAGC exists: %d\n", avs_function_exists(env, "HDRAGC"));
+
+    // ---- HDRAGC (RGB32) scenarios, compared by test/reference.py ----
+    {
+        AVS_Value src = make_clip(64, 48, 3, 0x35507A);   // identity: max_gain=1
+        const char *nm[] = { NULL, "max_gain", NULL };
+        const double vl[] = { 1.0 };
+        AVS_Value out = apply_hdragc(src, 1, nm, vl);
+        render(out, outpath("host_identity.raw"));
+        avs_release_value(out); avs_release_value(src);
+    }
+    {
+        AVS_Value src = make_clip(64, 48, 8, 0x202020);   // dark, defaults, ring buffer
+        AVS_Value out = apply_hdragc(src, 0, NULL, NULL);
+        render(out, outpath("host_dark.raw"));
+        avs_release_value(out); avs_release_value(src);
+    }
+    {
+        AVS_Value src = make_clip(48, 32, 6, 0x202020);   // dark, mode 0
+        AVS_Value args[5];
+        const char *nm[] = { NULL, "mode", "circle", "avg_window", "response", NULL };
+        args[0] = src;
+        args[1] = avs_new_value_int(0);
+        args[2] = avs_new_value_int(5);
+        args[3] = avs_new_value_int(4);
+        args[4] = avs_new_value_int(50);
+        AVS_Value out = avs_invoke(env, "HDRAGC", avs_new_value_array(args, 5), nm);
+        if (avs_is_error(out)) die("HDRAGC m0", out);
+        render(out, outpath("host_dark_m0.raw"));
+        avs_release_value(out); avs_release_value(src);
+    }
+    {
+        AVS_Value src = make_clip(64, 48, 3, 0xD0D0D0);   // bright
+        AVS_Value out = apply_hdragc(src, 0, NULL, NULL);
+        render(out, outpath("host_bright.raw"));
+        avs_release_value(out); avs_release_value(src);
+    }
+
+    // ---- Aurora scenarios, compared by test/reference_aurora.py ----
+    // (name, source clip, n_extra, arg names, arg values); each dumps
+    // host_<name>_src.raw (input) and host_<name>.raw (output).
+    {
+        char sp[128], op[128];
+        #define AURORA_CASE(NAME, SRC, NEXTRA, NM, ...) do {                     \
+            AVS_Value yuv_ = (SRC);                                              \
+            AVS_Value a_[8]; a_[0] = yuv_;                                       \
+            AVS_Value ex_[] = { __VA_ARGS__ };                                   \
+            for (int i_ = 0; i_ < (NEXTRA); i_++) a_[1 + i_] = ex_[i_];          \
+            snprintf(sp, sizeof sp, "host_%s_src.raw", NAME);                    \
+            snprintf(op, sizeof op, "host_%s.raw", NAME);                        \
+            render(yuv_, outpath(sp));                                           \
+            AVS_Value o_ = avs_invoke(env, "Aurora",                             \
+                avs_new_value_array(a_, 1 + (NEXTRA)), NM);                      \
+            if (avs_is_error(o_)) die("Aurora " NAME, o_);                       \
+            render(o_, outpath(op));                                             \
+            avs_release_value(o_); avs_release_value(yuv_);                      \
+        } while (0)
+
+        const char *nm_none[] = { NULL, NULL };
+        const char *nm_dom[]  = { NULL, "domain", NULL };
+        const char *nm_eng[]  = { NULL, "engine", NULL };
+        const char *nm_tpg[]  = { NULL, "pg_smooth", "scene_cut", NULL };
+        const char *nm_frz[]  = { NULL, "freezer", "corrector", "reducer", "black_clip", "shift", NULL };
+        const char *nm_prot[] = { NULL, "domain", "protect", "protect_above", NULL };
+        const char *nm_vib[]  = { NULL, "chroma_mode", "coef_sat", NULL };
+
+        AURORA_CASE("aurora_default", make_yv12(64, 48, 6, 0x202020), 0, nm_none, avs_new_value_int(0));
+        AURORA_CASE("aurora_clahe",   make_yv12(64, 48, 3, 0x202020), 1, nm_eng, avs_new_value_string("clahe"));
+        AURORA_CASE("aurora_freeze",  make_yv12(64, 48, 4, 0x182038), 5, nm_frz,
+                    avs_new_value_int(0), avs_new_value_float(0.9), avs_new_value_float(1.0),
+                    avs_new_value_float(0.01), avs_new_value_int(4));
+        AURORA_CASE("aurora_lin",     make_yv12(64, 48, 3, 0x202020), 1, nm_dom, avs_new_value_string("linear"));
+        AURORA_CASE("aurora_log",     make_yv12(64, 48, 3, 0x202020), 1, nm_dom, avs_new_value_string("log"));
+        {
+            AVS_Value a[6];
+            const char *nm[] = { "width", "height", "length", "pixel_type", "color", "fps", NULL };
+            a[0] = avs_new_value_int(64); a[1] = avs_new_value_int(48); a[2] = avs_new_value_int(3);
+            a[3] = avs_new_value_string("YV24"); a[4] = avs_new_value_int(0x202020); a[5] = avs_new_value_int(25);
+            AVS_Value yuv = avs_invoke(env, "BlankClip", avs_new_value_array(a, 6), nm);
+            if (avs_is_error(yuv)) die("BlankClip 444", yuv);
+            AURORA_CASE("aurora_444", yuv, 0, nm_none, avs_new_value_int(0));
+        }
+        {
+            AVS_Value sp_args[2] = { make_yv12(64, 48, 3, 0x202020), make_yv12(64, 48, 3, 0xC8C8C8) };
+            AVS_Value spl = avs_invoke(env, "UnalignedSplice", avs_new_value_array(sp_args, 2), NULL);
+            if (avs_is_error(spl)) die("Splice", spl);
+            AURORA_CASE("aurora_tpg", spl, 2, nm_tpg, avs_new_value_float(0.7), avs_new_value_float(0.2));
+        }
+        // ColorBars (non-uniform content)
+        AURORA_CASE("cb_dark",  make_cb(64, 48, -110, 3), 0, nm_none, avs_new_value_int(0));
+        AURORA_CASE("cb_clahe", make_cb(64, 48, -110, 3), 1, nm_eng, avs_new_value_string("clahe"));
+        AURORA_CASE("cb_lin",   make_cb(64, 48, -110, 3), 1, nm_dom, avs_new_value_string("linear"));
+        {
+            AVS_Value sp_args[2] = { make_cb(64, 48, -110, 3), make_cb(64, 48, 90, 3) };
+            AVS_Value spl = avs_invoke(env, "UnalignedSplice", avs_new_value_array(sp_args, 2), NULL);
+            if (avs_is_error(spl)) die("Splice cb", spl);
+            AURORA_CASE("cb_tpg", spl, 2, nm_tpg, avs_new_value_float(0.5), avs_new_value_float(0.3));
+        }
+        AURORA_CASE("cb_prot", make_cb(64, 48, 90, 3), 3, nm_prot,
+                    avs_new_value_string("log"), avs_new_value_int(1), avs_new_value_float(160.0));
+        AURORA_CASE("cb_vib",  make_cb(64, 48, -110, 3), 2, nm_vib,
+                    avs_new_value_string("vibrance"), avs_new_value_float(2.6));
+        #undef AURORA_CASE
+    }
 
     // 19) contrast restore on darkened ColorBars
     {
