@@ -4,7 +4,9 @@ float32 arithmetic operation-by-operation. Input YUV planes are dumped by
 the C host (host_aurora_*_src.raw) so no colorspace reimplementation is
 needed. Supports YV12 and YUV444P, domain gamma/linear/log, temporal gain-map
 IIR (pg_smooth) and scene-cut detection (scene_cut)."""
+import os
 import numpy as np
+OUT = os.environ.get('HDLT_OUT', '/tmp/hdlt')
 
 f32 = np.float32
 WEIGHTS = np.exp(-np.power(np.abs(
@@ -392,21 +394,21 @@ class AuroraRef:
 
 
 def load_yuv(name, w, h, n, fmt='yv12'):
-    Y = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}.raw', dtype=np.uint8).reshape(n, h, w)
+    Y = np.fromfile(f'{OUT}/host_{name}.raw', dtype=np.uint8).reshape(n, h, w)
     cw = (w + 1) // 2 if fmt == 'yv12' else w
     ch = (h + 1) // 2 if fmt == 'yv12' else h
-    U = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}.raw.u', dtype=np.uint8).reshape(n, ch, cw)
-    V = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}.raw.v', dtype=np.uint8).reshape(n, ch, cw)
+    U = np.fromfile(f'{OUT}/host_{name}.raw.u', dtype=np.uint8).reshape(n, ch, cw)
+    V = np.fromfile(f'{OUT}/host_{name}.raw.v', dtype=np.uint8).reshape(n, ch, cw)
     return Y, U, V
 
 
 def load_src(name, w, h, n, fmt='yv12'):
     """The plugin's INPUT planes, dumped by the host (host_<name>_src.raw)."""
-    Y = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}_src.raw', dtype=np.uint8).reshape(n, h, w)
+    Y = np.fromfile(f'{OUT}/host_{name}_src.raw', dtype=np.uint8).reshape(n, h, w)
     cw = (w + 1) // 2 if fmt == 'yv12' else w
     ch = (h + 1) // 2 if fmt == 'yv12' else h
-    U = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}_src.raw.u', dtype=np.uint8).reshape(n, ch, cw)
-    V = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}_src.raw.v', dtype=np.uint8).reshape(n, ch, cw)
+    U = np.fromfile(f'{OUT}/host_{name}_src.raw.u', dtype=np.uint8).reshape(n, ch, cw)
+    V = np.fromfile(f'{OUT}/host_{name}_src.raw.v', dtype=np.uint8).reshape(n, ch, cw)
     return Y, U, V
 
 

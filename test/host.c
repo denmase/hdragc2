@@ -8,6 +8,17 @@
 
 #define PLUGIN "/tmp/libhdragc2.so"
 
+// Output directory for raw dumps (override with HDLT_OUT).
+static const char *outdir(void) {
+    const char *d = getenv("HDLT_OUT");
+    return d && *d ? d : "/tmp/hdlt";
+}
+static const char *outpath(const char *name) {
+    static char buf[512];
+    snprintf(buf, sizeof buf, "%s/%s", outdir(), name);
+    return buf;
+}
+
 static AVS_ScriptEnvironment *env;
 
 static AVS_Value invoke1(const char *name, AVS_Value arg) {
@@ -130,6 +141,7 @@ static AVS_Value apply_hdragc(AVS_Value src, int n_extra, const char **names, co
 }
 
 int main(void) {
+    { char cmd[600]; snprintf(cmd, sizeof cmd, "mkdir -p \"%s\"", outdir()); if (system(cmd)) return 1; }
     env = avs_create_script_environment(AVISYNTH_INTERFACE_VERSION);
     if (!env) { fprintf(stderr, "no env\n"); return 1; }
 
@@ -142,14 +154,14 @@ int main(void) {
     // 19) contrast restore on darkened ColorBars
     {
         AVS_Value yuv = make_cb(64, 48, -110, 3);
-        render(yuv, "/mnt/agents/output/hdlt/host_cb_ctr_src.raw");
+        render(yuv, outpath("host_cb_ctr_src.raw"));
         AVS_Value args[2];
         const char *nm[] = { NULL, "contrast", NULL };
         args[0] = yuv;
         args[1] = avs_new_value_float(0.8);
         AVS_Value out = avs_invoke(env, "Aurora", avs_new_value_array(args, 2), nm);
         if (avs_is_error(out)) die("Aurora cb_ctr", out);
-        render(out, "/mnt/agents/output/hdlt/host_cb_ctr.raw");
+        render(out, outpath("host_cb_ctr.raw"));
         avs_release_value(out); avs_release_value(yuv);
     }
 

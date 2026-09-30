@@ -70,7 +70,7 @@ jobs:
           # NOTE: GitHub wraps run: in "bash -e -o pipefail" — never use
           # bare A && B && C chains here (a false test kills the whole
           # step); use if/then, which is exempt from -e.
-          LIB=$(ls zig-out/bin/* zig-out/lib/* 2>/dev/null | head -1)
+          LIB=$(ls zig-out/bin/* zig-out/lib/* 2>/dev/null | head -1 || true)
           OD=$(command -v objdump || command -v llvm-objdump || true)
           if [ -z "$OD" ]; then
             if [ -x "/c/Program Files/LLVM/bin/llvm-objdump.exe" ]; then
@@ -79,7 +79,7 @@ jobs:
           fi
           if [ -z "$OD" ]; then
             echo "WARN: no objdump available on this runner, baseline check skipped"
-          elif "$OD" -d "$LIB" 2>/dev/null | grep -qE "zmm|ymm|vzeroupper|vbroadcast"; then
+          elif "$OD" -d "$LIB" 2>/dev/null > "$RUNNER_TEMP/dis.txt"; grep -qE "zmm|ymm|vzeroupper|vbroadcast" "$RUNNER_TEMP/dis.txt"; then
             echo "ERROR: $LIB contains AVX instructions (not generic x86-64 baseline)"; exit 1
           else
             echo "baseline OK: $LIB ($OD)"
