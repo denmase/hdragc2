@@ -32,6 +32,7 @@ const allocator = std.heap.c_allocator;
 var api: *const avs.AvsApi = undefined;
 
 const Engine = enum { legacy, guided, clahe };
+const ChromaMode = enum { sat, vibrance };
 
 const AuroraData = struct {
     // ---- parameters (documented 1.8.7 set + Aurora additions) ----
@@ -49,6 +50,8 @@ const AuroraData = struct {
     engine: Engine,
     protect: i32, // 0=off, 1=on, 2=auto
     protect_above: f32, // luma (gamma-domain) where the protect taper starts (doc: 204)
+    chroma_mode: ChromaMode, // "sat": linear chroma scale | "vibrance": boost fades with existing saturation
+    contrast: f32, // midtone contrast restore strength 0..1 (0=off); slope <= 1.2
     passes: i32, // legacy-engine iterations
     shift: i32, // fixed luma pre-shift
     shadows: bool,
@@ -145,6 +148,13 @@ fn parseEngine(args: c.AVS_Value, mode: i32) Engine {
     return if (mode == 1) .legacy else .guided;
 }
 
+fn parseChromaMode(args: c.AVS_Value) ChromaMode {
+    if (argStr(args, 30)) |s| {
+        if (std.ascii.eqlIgnoreCase(s, "vibrance")) return .vibrance;
+    }
+    return .sat;
+}
+
 fn parseDomain(args: c.AVS_Value) common.Domain {
     if (argStr(args, 28)) |s| {
         if (std.ascii.eqlIgnoreCase(s, "linear")) return .linear;
@@ -194,6 +204,8 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
         .engine = parseEngine(args, mode),
         .protect = argInt(args, 13, 2),
         .protect_above = argFloat(args, 29, 204.0),
+        .chroma_mode = parseChromaMode(args),
+        .contrast = argFloat(args, 31, 0.0),
         .passes = argInt(args, 14, 4),
         .shift = argInt(args, 15, 0),
         .shadows = argBool(args, 16, true),
@@ -250,6 +262,8 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     if (d.passes < 1) d.passes = 1;
     if (d.pg_smooth < 0.0) d.pg_smooth = 0.0;
     if (d.pg_smooth > 0.95) d.pg_smooth = 0.95;
+    if (d.contrast < 0.0) d.contrast = 0.0;
+    if (d.contrast > 1.0) d.contrast = 1.0;
 
     // Domain precomputations: transform the gamma-domain reference points so
     // parameter MEANING stays stable across domains (avg_lum=128 in gamma
@@ -288,7 +302,6 @@ fn auroraSetCacheHints(fi: [*c]c.AVS_FilterInfo, cachehints: c_int, frame_range:
 
 fn auroraFree(fi: [*c]c.AVS_FilterInfo) callconv(.c) void {
     const d: *AuroraData = @ptrCast(@alignCast(fi.*.user_data));
-    std.debug.print("[afree] w={d} h={d}\n", .{d.width, d.height});
     allocator.free(d.prev_gain);
     allocator.free(d.pg_prev);
     allocator.free(d.ybuf);
@@ -604,6 +617,17 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
                 out += @min((g - 1.0) * 4.0, 12.0) * t * t;
             }
             if (domain != .gamma) out = common.inv(domain, out);
+            if (d.contrast > 0.0) {
+                // Midtone contrast restore, anchored at avg_lum so the lifted
+                // shadows keep their brightness. Below ~40% of the pivot the
+                // curve blends back to identity (protected dark floor), so
+                // shadows never return to black. Slope capped at 1.2.
+                const slope = 1.0 + d.contrast * 0.2;
+                const pivot: f32 = @floatFromInt(d.avg_lum);
+                const curved = pivot + (out - pivot) * slope;
+                const wblend = std.math.clamp(out / (pivot * 0.4), 0.0, 1.0);
+                out = out * (1.0 - wblend) + curved * wblend;
+            }
             dst_row[y * dst_pitch + x] = @intCast(std.math.clamp(common.roundOrig(out), 0, 255));
         }
     }
@@ -635,6 +659,16 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
             var sat = 1.0 + (g_avg - 1.0) * d.coef_sat;
             if (sat > d.max_sat) sat = d.max_sat;
             if (sat < d.min_sat) sat = d.min_sat;
+            if (d.chroma_mode == .vibrance) {
+                // Vibrance: the boost fades as the pixel's existing chroma
+                // magnitude grows — muted colors get the full boost, already
+                // saturated colors are protected (no neon noise blow-up).
+                const un0: i32 = @as(i32, u_src[cy * u_pitch + cx]) - 128;
+                const vn0: i32 = @as(i32, v_src[cy * v_pitch + cx]) - 128;
+                const mag: f32 = @floatFromInt(@max(@abs(un0), @abs(vn0)));
+                const w = std.math.clamp(1.0 - mag / 64.0, 0.0, 1.0);
+                sat = 1.0 + (sat - 1.0) * w;
+            }
             const un: i32 = @as(i32, u_src[cy * u_pitch + cx]) - 128;
             const vn: i32 = @as(i32, v_src[cy * v_pitch + cx]) - 128;
             const uo = @as(i32, 128) + @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(un)) * sat))) + d.shift_u;
@@ -657,7 +691,7 @@ pub fn register(env: *c.AVS_ScriptEnvironment, avs_api: *const avs.AvsApi) void 
         "c[avg_lum]i[max_gain]f[min_gain]f[coef_gain]f[max_sat]f[min_sat]f[coef_sat]f" ++
             "[avg_window]i[response]i[debug]b[mode]i[engine]s[protect]i[passes]i[shift]i" ++
             "[shadows]b[shift_u]i[shift_v]i[corrector]f[reducer]f[black_clip]f[freezer]i" ++
-            "[radius]i[clip_limit]f[tiles]i[pg_smooth]f[scene_cut]f[domain]s[protect_above]f",
+            "[radius]i[clip_limit]f[tiles]i[pg_smooth]f[scene_cut]f[domain]s[protect_above]f[chroma_mode]s[contrast]f",
         &auroraCreate,
         null,
     );

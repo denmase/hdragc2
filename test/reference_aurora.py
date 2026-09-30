@@ -193,7 +193,8 @@ class AuroraRef:
                  avg_window=-1, response=100, protect=2, passes=4, shift=0,
                  shadows=True, shift_u=0, shift_v=0, corrector=0.0, reducer=0.5,
                  black_clip=0.0, freezer=-1, radius=7, clip_limit=2.0, tiles=8,
-                 pg_smooth=0.0, scene_cut=0.0, protect_above=204.0, fps=25):
+                 pg_smooth=0.0, scene_cut=0.0, protect_above=204.0,
+                 chroma_mode='sat', contrast=0.0, fps=25):
         self.w, self.h = w, h
         self.engine, self.fmt, self.domain = engine, fmt, domain
         self.avg_lum = avg_lum
@@ -208,6 +209,8 @@ class AuroraRef:
         self.tiles = max(1, tiles)
         self.pg_smooth = min(max(f32(pg_smooth), f32(0.0)), f32(0.95))
         self.protect_above = f32(protect_above)
+        self.chroma_mode = chroma_mode
+        self.contrast = f32(min(max(contrast, 0.0), 1.0))
         self.scene_cut = f32(scene_cut)
         if avg_window == -1: avg_window = int(np.ceil(f32(fps)))
         self.avg_window = max(1, avg_window)
@@ -353,6 +356,12 @@ class AuroraRef:
                     out = f32(out + min((g - f32(1.0)) * f32(4.0), f32(12.0)) * t * t)
                 if dom != 'gamma':
                     out = inv(dom, out)
+                if self.contrast > 0.0:
+                    slope = f32(1.0) + self.contrast * f32(0.2)
+                    pivot = f32(self.avg_lum)
+                    curved = pivot + (out - pivot) * slope
+                    wblend = min(1.0, max(0.0, out / (pivot * f32(0.4))))
+                    out = out * (f32(1.0) - wblend) + curved * wblend
                 Yout[idx] = min(255, max(0, int(round_orig(np.float32(out)))))
         # 10. chroma
         yv12 = (self.fmt == 'yv12')
@@ -370,6 +379,10 @@ class AuroraRef:
                     g_avg = pgm[cy, cx]
                 sat = f32(1.0) + (g_avg - f32(1.0)) * self.coef_sat
                 sat = min(max(sat, self.min_sat), self.max_sat)
+                if self.chroma_mode == 'vibrance':
+                    mag = max(abs(int(U[cy, cx]) - 128), abs(int(V[cy, cx]) - 128))
+                    vw = min(1.0, max(0.0, 1.0 - mag / 64.0))  # NOT 'w' - shadows frame width
+                    sat = f32(1.0) + (sat - f32(1.0)) * f32(vw)
                 un = np.int32(U[cy, cx]) - 128
                 vn = np.int32(V[cy, cx]) - 128
                 uo = int(128 + int(np.floor(f32(un) * sat + f32(0.5))) + self.shift_u)
@@ -379,21 +392,21 @@ class AuroraRef:
 
 
 def load_yuv(name, w, h, n, fmt='yv12'):
-    Y = np.fromfile(f'/tmp/host_{name}.raw', dtype=np.uint8).reshape(n, h, w)
+    Y = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}.raw', dtype=np.uint8).reshape(n, h, w)
     cw = (w + 1) // 2 if fmt == 'yv12' else w
     ch = (h + 1) // 2 if fmt == 'yv12' else h
-    U = np.fromfile(f'/tmp/host_{name}.raw.u', dtype=np.uint8).reshape(n, ch, cw)
-    V = np.fromfile(f'/tmp/host_{name}.raw.v', dtype=np.uint8).reshape(n, ch, cw)
+    U = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}.raw.u', dtype=np.uint8).reshape(n, ch, cw)
+    V = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}.raw.v', dtype=np.uint8).reshape(n, ch, cw)
     return Y, U, V
 
 
 def load_src(name, w, h, n, fmt='yv12'):
     """The plugin's INPUT planes, dumped by the host (host_<name>_src.raw)."""
-    Y = np.fromfile(f'/tmp/host_{name}_src.raw', dtype=np.uint8).reshape(n, h, w)
+    Y = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}_src.raw', dtype=np.uint8).reshape(n, h, w)
     cw = (w + 1) // 2 if fmt == 'yv12' else w
     ch = (h + 1) // 2 if fmt == 'yv12' else h
-    U = np.fromfile(f'/tmp/host_{name}_src.raw.u', dtype=np.uint8).reshape(n, ch, cw)
-    V = np.fromfile(f'/tmp/host_{name}_src.raw.v', dtype=np.uint8).reshape(n, ch, cw)
+    U = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}_src.raw.u', dtype=np.uint8).reshape(n, ch, cw)
+    V = np.fromfile(f'/mnt/agents/output/hdlt/host_{name}_src.raw.v', dtype=np.uint8).reshape(n, ch, cw)
     return Y, U, V
 
 
@@ -437,4 +450,7 @@ if __name__ == '__main__':
     # protect taper in the LOG domain on bright content (regression: limit
     # must be computed as fwd(204/gain), not fwd(204)/gain)
     ok &= compare('cb_prot', 64, 48, 3, AuroraRef(64, 48, domain='log', protect=1, protect_above=160.0), tol=2)
+    ok &= compare('cb_vib', 64, 48, 3, AuroraRef(64, 48, chroma_mode='vibrance', coef_sat=2.6), tol=2)
+    # contrast restore (gamma-domain, protected dark floor)
+    ok &= compare('cb_ctr', 64, 48, 3, AuroraRef(64, 48, contrast=0.8), tol=2)
     print('AURORA CROSS-CHECK', 'PASSED' if ok else 'FAILED')
