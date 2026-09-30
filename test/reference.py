@@ -3,6 +3,7 @@
 for cross-checking the Zig plugin output. Float32 everywhere to mirror
 the C arithmetic."""
 import numpy as np
+import os
 import sys
 
 f32 = np.float32
@@ -173,7 +174,8 @@ def blank(w, h, length, color):
     return [fr.copy() for _ in range(length)]
 
 def compare(name, w, h, frames, ref_frames):
-    got = np.fromfile(f'/tmp/host_{name}.raw', dtype=np.uint8).reshape(-1, h, w, 4)
+    out = os.environ.get('HDLT_OUT', '/tmp/hdlt')
+    got = np.fromfile(f'{out}/host_{name}.raw', dtype=np.uint8).reshape(-1, h, w, 4)
     assert got.shape[0] == len(ref_frames), (got.shape, len(ref_frames))
     worst = 0; total = 0; n = 0
     for i, rf in enumerate(ref_frames):
