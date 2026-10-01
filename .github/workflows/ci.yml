@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
 
 env:
@@ -159,3 +160,27 @@ jobs:
           pip install numpy
           python3 test/reference.py
           python3 test/reference_aurora.py
+
+  # Publishes a GitHub Release when a v* tag is pushed (e.g. from GitHub
+  # Desktop: History -> right-click commit -> Create Tag, then Push origin).
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Package
+        run: |
+          cd dist
+          for d in hdragc2-*; do
+            (cd "$d" && zip -9 "../$d.zip" *)
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
