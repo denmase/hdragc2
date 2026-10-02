@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.2 (2026-10-02)
+
+### Fixed (bug review)
+- HDRAGC mode=0: `circle_mat` zero-initialized — the preserved asymmetric
+  original loop never writes the +circle row/column and the 2D pass read
+  malloc garbage (UB in ReleaseFast). Matches the Python reference, which
+  already assumed zeros.
+- HDRAGC: `max_sat < 1` is rejected with an explicit error (negative
+  saturation-table size was UB); `max_gain == 1` with `coef_sat == 0` no
+  longer divides by zero (propagated inf/NaN reached `@intFromFloat`).
+- CLAHE: tiles starting at/past the frame edge (tiles larger than the frame,
+  or exact multiples like w=20/tiles=6) underflowed usize or divided by
+  zero. Tiles are clamped to min(w,h), empty tiles get an identity LUT, the
+  clip conversion is clamped, and Aurora rejects `clip_limit < 0`.
+- Aurora `freezer=N` now actually freezes frame N — frames before N take the
+  normal temporal path — and the frozen state is cleared on non-sequential
+  access so seeking stays deterministic. (Previously any freezer >= 0 froze
+  the first frame the host happened to evaluate.)
+- OOM robustness: `boxBlur`/`guidedFilter`/`clahe` propagate errors instead
+  of returning with an uninitialized output buffer; `hdragcCreate` and
+  `auroraCreate` free all earlier buffers via errdefer when a later
+  allocation fails.
+- CI: the vendored AviSynth+ build cache key now includes
+  `hashFiles('vendor/avisynthplus/**')`.
+
 ## 0.1.5-zig (2026-09-29)
 
 - Initial release: 1:1 port of HDRAGC v0.1.5 (LaTo INV./Paviko, 2005) to Zig.

@@ -35,7 +35,7 @@ port, as designed in `hdragc2-desain.md`:
 | corrector | 0.0 | 1=no shaping; lower withholds gain from bright pixels |
 | reducer | 0.5 | gain-map spatial smoothing, 0..2 |
 | black_clip | 0.0 | fraction of darkest pixels pinned to black |
-| freezer | -1 | >=0: freeze statistics from the first evaluated frame |
+| freezer | -1 | >=0: freeze statistics from frame N (frames before N use normal temporal smoothing) |
 | radius / clip_limit / tiles | 7 / 2.0 / 8 | Aurora tuning (estimator radius, CLAHE clip & grid) |
 
 Where the 1.8.7 documentation was ambiguous, the chosen interpretation is
@@ -158,6 +158,10 @@ Parameters (defaults per the 0.1.5 source):
     original behavior.
 11. Frame properties are carried to the output (`prop_src`), a small V8+
     improvement.
+12. Fixed instead of preserved: `circle_mat` is zero-initialized (the
+    original's mode=0 pass read the never-written +circle row/column),
+    `max_sat >= 1` is validated, and `max_gain == 1` with `coef_sat == 0`
+    no longer divides by zero.
 
 ## Verification status
 

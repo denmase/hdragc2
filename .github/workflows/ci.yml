@@ -137,7 +137,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/avsbuild/avs_core
-          key: avsplus-vendored-avs-core
+          # FIX: the key used to be constant, so a vendored-source update
+          # kept reusing a stale libavisynth.so while the plugin was built
+          # against the new headers (the exact mismatch this job prevents).
+          key: avsplus-vendored-avs-core-${{ hashFiles('vendor/avisynthplus/**') }}
 
       - name: Build AviSynth+ from vendored source
         if: steps.cache-avs.outputs.cache-hit != 'true'

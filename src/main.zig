@@ -124,8 +124,18 @@ fn hdragcCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     const mode: i32 = if (argDefined(args, 13)) @intCast(argInt(args, 13)) else 1;
 
     // ---- original constructor logic ----
+    // FIX (bug review): the saturation table size is (max_sat-1)*100+1, so
+    // max_sat < 1 makes @intFromFloat produce a negative usize (panic in
+    // safe builds, UB in ReleaseFast). Validate instead of preserving the
+    // original's unchecked cast.
+    if (max_sat < 1.0)
+        return c.avs_new_value_error("HDRAGC: max_sat must be >= 1.0.");
+    // FIX (bug review): max_gain == 1 with coef_sat == 0 divides by zero,
+    // propagating inf/NaN into the per-pixel saturation index. With no gain
+    // range there is no proportional boost, so 0 is the only sensible
+    // coefficient.
     if (coef_sat == 0.0)
-        coef_sat = (max_sat - min_sat) / (max_gain - 1.0);
+        coef_sat = if (max_gain != 1.0) (max_sat - min_sat) / (max_gain - 1.0) else 0.0;
 
     if (avg_window == -1) {
         const fps: f32 = @as(f32, @floatFromInt(vi.fps_numerator)) / @as(f32, @floatFromInt(vi.fps_denominator));
@@ -143,8 +153,28 @@ fn hdragcCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     // nonsensical gauss table). The port deliberately fixes the value.
     if (sigma < 0.0) sigma = 1.5;
 
+    // FIX (bug review): allocate every buffer up front with errdefer
+    // cleanup — the original struct literal leaked all earlier buffers
+    // plus the struct itself when a later allocation failed.
     const d = allocator.create(HdrAgcData) catch
         return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.destroy(d);
+    const prev_gain = allocator.alloc(f32, @intCast(avg_window)) catch
+        return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(prev_gain);
+    const rbuf = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(rbuf);
+    const gbuf = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(gbuf);
+    const bbuf = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(bbuf);
+    const ylum = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(ylum);
+    const yloc = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(yloc);
+    const cmat = allocator.alloc(u8, @intCast((2 * circle + 1) * (2 * circle + 1))) catch
+        return c.avs_new_value_error("HDRAGC: out of memory.");
+    errdefer allocator.free(cmat);
     d.* = .{
         .avg_lum = avg_lum,
         .max_gain = max_gain,
@@ -159,19 +189,17 @@ fn hdragcCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
         .sigma = sigma,
         .verbose = verbose,
         .mode = mode,
-        .prev_gain = allocator.alloc(f32, @intCast(avg_window)) catch
-            return c.avs_new_value_error("HDRAGC: out of memory."),
+        .prev_gain = prev_gain,
         .gauss = undefined,
         .width = width,
         .height = height,
         .pixels = pixels,
-        .r = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory."),
-        .g = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory."),
-        .b = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory."),
-        .y_lum = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory."),
-        .y_local = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("HDRAGC: out of memory."),
-        .circle_mat = allocator.alloc(u8, @intCast((2 * circle + 1) * (2 * circle + 1))) catch
-            return c.avs_new_value_error("HDRAGC: out of memory."),
+        .r = rbuf,
+        .g = gbuf,
+        .b = bbuf,
+        .y_lum = ylum,
+        .y_local = yloc,
+        .circle_mat = cmat,
         .sat_a = undefined,
         .sat_b = undefined,
         .sat_c = undefined,
@@ -184,8 +212,13 @@ fn hdragcCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     // ---- gauss table (identical to the original constructor) ----
     common.buildGauss(&d.gauss, avg_lum, d.sigma, pixels);
 
-    // ---- circle matrix. ORIGINAL BUG (preserved): the original loop
-    // `for (x = -circle; x < circle; x++)` is asymmetric (skips +circle).
+    // ---- circle matrix. ORIGINAL BUG (preserved loop asymmetry): the
+    // original `for (x = -circle; x < circle; x++)` skips +circle.
+    // FIX (bug review): alloc() does not zero the buffer, and the mode==0
+    // pass reads the never-written +circle row/column — the result depended
+    // on malloc garbage. Zero it, matching the Python reference (which
+    // treats the skipped entries as "outside the circle").
+    @memset(d.circle_mat, 0);
     {
         const csz: usize = @intCast(2 * circle + 1);
         var x: i32 = -circle;
@@ -202,11 +235,17 @@ fn hdragcCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     {
         const sat_size: usize = @as(usize, @intFromFloat((max_sat - 1.0) * 100.0)) + 1;
         d.sat_a = allocator.alloc(f32, sat_size) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+        errdefer allocator.free(d.sat_a);
         d.sat_b = allocator.alloc(f32, sat_size) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+        errdefer allocator.free(d.sat_b);
         d.sat_c = allocator.alloc(f32, sat_size) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+        errdefer allocator.free(d.sat_c);
         d.sat_d = allocator.alloc(f32, sat_size) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+        errdefer allocator.free(d.sat_d);
         d.sat_e = allocator.alloc(f32, sat_size) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+        errdefer allocator.free(d.sat_e);
         d.sat_f = allocator.alloc(f32, sat_size) catch return c.avs_new_value_error("HDRAGC: out of memory.");
+        errdefer allocator.free(d.sat_f);
         for (0..sat_size) |i| {
             const fs: f32 = @floatFromInt(i);
             d.sat_a[i] = (1.0 - (1.0 + fs / 100.0)) * RLUM;

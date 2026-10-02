@@ -48,12 +48,14 @@ pub fn buildGauss(gauss: *[256]f32, avg_lum: i32, sigma: f32, pixels: usize) voi
 }
 
 /// Separable box blur on a float plane (running-sum implementation, O(w*h)).
-pub fn boxBlur(src: []const f32, dst: []f32, w: usize, h: usize, r: usize) void {
+pub fn boxBlur(src: []const f32, dst: []f32, w: usize, h: usize, r: usize) error{OutOfMemory}!void {
     if (r == 0) {
         @memcpy(dst, src);
         return;
     }
-    const tmp = std.heap.c_allocator.alloc(f32, w * h) catch return;
+    // FIX (bug review): the old `catch return` silently left `dst`
+    // uninitialized on OOM; the caller then used garbage. Propagate.
+    const tmp = std.heap.c_allocator.alloc(f32, w * h) catch return error.OutOfMemory;
     defer std.heap.c_allocator.free(tmp);
     // Horizontal pass. Running window [lo..hi] slides one pixel right per
     // step; at frame edges the window is clamped (shrinks or stays pinned),
@@ -143,14 +145,14 @@ pub fn buildYlut(ylut: *[256]f32, hist: *const [256]u32, gauss: *const [256]f32,
 
 /// Self-guided filter (He et al. 2010) on an 8-bit luma plane, output as
 /// float in 0..255. `eps` is the regularization variance.
-pub fn guidedFilter(src: []const u8, dst: []f32, tmp1: []f32, tmp2: []f32, w: usize, h: usize, r: usize, eps: f32) void {
+pub fn guidedFilter(src: []const u8, dst: []f32, tmp1: []f32, tmp2: []f32, w: usize, h: usize, r: usize, eps: f32) error{OutOfMemory}!void {
     const n = w * h;
     const mean_i = tmp1; // float luma + its box blur reused below
     const ii = dst; // I*I (as float)
     // mean_I
     for (0..n) |i| mean_i[i] = @floatFromInt(src[i]);
     const mean_blur = tmp2;
-    boxBlur(mean_i, mean_blur, w, h, r);
+    try boxBlur(mean_i, mean_blur, w, h, r);
     // var = mean(I^2) - mean(I)^2 ; a = var/(var+eps); b = meanI*(1-a)
     // reuse mean_i to hold `a`, mean_blur holds meanI
     const a_coef = mean_i;
@@ -162,9 +164,9 @@ pub fn guidedFilter(src: []const u8, dst: []f32, tmp1: []f32, tmp2: []f32, w: us
     }
     // NOTE: buffer juggling is handled by the caller providing distinct
     // scratch; here we allocate once more for clarity.
-    const mean_ii = std.heap.c_allocator.alloc(f32, n) catch return;
+    const mean_ii = std.heap.c_allocator.alloc(f32, n) catch return error.OutOfMemory;
     defer std.heap.c_allocator.free(mean_ii);
-    boxBlur(ii, mean_ii, w, h, r);
+    try boxBlur(ii, mean_ii, w, h, r);
     const b_coef = ii; // reuse ii for b
     for (0..n) |i| {
         const v = mean_ii[i] - meanI[i] * meanI[i];
@@ -173,9 +175,9 @@ pub fn guidedFilter(src: []const u8, dst: []f32, tmp1: []f32, tmp2: []f32, w: us
     }
     // q = box(a)*I + box(b)
     const box_a = mean_ii; // reuse
-    boxBlur(a_coef, box_a, w, h, r);
+    try boxBlur(a_coef, box_a, w, h, r);
     const box_b = meanI; // reuse (meanI no longer needed)
-    boxBlur(b_coef, box_b, w, h, r);
+    try boxBlur(b_coef, box_b, w, h, r);
     for (0..n) |i| {
         const v: f32 = @floatFromInt(src[i]);
         dst[i] = box_a[i] * v + box_b[i];
@@ -185,12 +187,17 @@ pub fn guidedFilter(src: []const u8, dst: []f32, tmp1: []f32, tmp2: []f32, w: us
 /// CLAHE (Contrast-Limited Adaptive Histogram Equalization) on an 8-bit luma
 /// plane. `clip_limit` is expressed like OpenCV (relative to the uniform
 /// distribution: clip = clip_limit * tile_pixels / 256). Output float 0..255.
-pub fn clahe(src: []const u8, dst: []f32, w: usize, h: usize, tiles: usize, clip_limit: f32) void {
+pub fn clahe(src: []const u8, dst: []f32, w: usize, h: usize, tiles_in: usize, clip_limit: f32) error{OutOfMemory}!void {
+    // FIX (bug review): tiles larger than the frame pushed the last tile
+    // start to/past the frame edge, where x1 - x0 underflowed usize (x0 > w)
+    // or tile_px == 0 divided by zero (x0 == w). Clamp the grid; per-tile
+    // guards below handle the exact-multiple case (e.g. w=20, tiles=6).
+    const tiles = @min(tiles_in, @max(@min(w, h), 1));
     const n = w * h;
     const tw = (w + tiles - 1) / tiles;
     const th = (h + tiles - 1) / tiles;
     // per-tile LUTs
-    const luts = std.heap.c_allocator.alloc(u8, tiles * tiles * 256) catch return;
+    const luts = std.heap.c_allocator.alloc(u8, tiles * tiles * 256) catch return error.OutOfMemory;
     defer std.heap.c_allocator.free(luts);
     for (0..tiles) |ty| {
         for (0..tiles) |tx| {
@@ -198,14 +205,26 @@ pub fn clahe(src: []const u8, dst: []f32, w: usize, h: usize, tiles: usize, clip
             const y0 = ty * th;
             const x1 = @min(x0 + tw, w);
             const y1 = @min(y0 + th, h);
-            const tile_px = (x1 - x0) * (y1 - y0);
             const lut = luts[(ty * tiles + tx) * 256 ..][0..256];
+            // FIX (bug review): a tile starting at/past the edge is empty;
+            // give it an identity LUT (edge interpolation may sample it).
+            if (x0 >= w or y0 >= h) {
+                for (0..256) |i| lut[i] = @intCast(i);
+                continue;
+            }
+            const tile_px = (x1 - x0) * (y1 - y0);
             var hist: [256]u32 = [_]u32{0} ** 256;
             for (y0..y1) |y| {
                 for (x0..x1) |x| hist[src[y * w + x]] += 1;
             }
             // clip and redistribute
-            const clip = @as(u32, @intFromFloat(clip_limit * @as(f32, @floatFromInt(tile_px)) / 256.0));
+            // clamp before the cast: huge clip_limit * tile_px would
+            // overflow u32 in @intFromFloat (UB in ReleaseFast).
+            const clip = @as(u32, @intFromFloat(std.math.clamp(
+                clip_limit * @as(f32, @floatFromInt(tile_px)) / 256.0,
+                0.0,
+                4.0e9,
+            )));
             if (clip > 0) {
                 var excess: u32 = 0;
                 for (0..256) |i| {

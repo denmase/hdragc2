@@ -187,8 +187,28 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     const mode = argInt(args, 11, 2);
     const domain = parseDomain(args);
 
+    // FIX (bug review): pre-allocate every buffer with errdefer cleanup —
+    // the original struct literal leaked all earlier buffers (and the
+    // struct) when a later allocation failed.
     const d = allocator.create(AuroraData) catch
         return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.destroy(d);
+    const ybuf_a = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(ybuf_a);
+    const est_in_a = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(est_in_a);
+    const wbuf_a = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(wbuf_a);
+    const ytmp_a = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(ytmp_a);
+    const lbuf_a = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(lbuf_a);
+    const pg_a = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(pg_a);
+    const tmp1_a = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(tmp1_a);
+    const tmp2_a = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(tmp2_a);
     d.* = .{
         .avg_lum = argInt(args, 1, 128),
         .max_gain = argFloat(args, 2, 3.0),
@@ -241,14 +261,14 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
         .cw = if (is_yv12) (width + 1) / 2 else width,
         .ch = if (is_yv12) (height + 1) / 2 else height,
         .pixels = pixels,
-        .ybuf = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .est_in = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .wbuf = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .ytmp = allocator.alloc(u8, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .lbuf = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .pg = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .tmp1 = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
-        .tmp2 = allocator.alloc(f32, pixels) catch return c.avs_new_value_error("Aurora: out of memory."),
+        .ybuf = ybuf_a,
+        .est_in = est_in_a,
+        .wbuf = wbuf_a,
+        .ytmp = ytmp_a,
+        .lbuf = lbuf_a,
+        .pg = pg_a,
+        .tmp1 = tmp1_a,
+        .tmp2 = tmp2_a,
     };
 
     if (d.avg_window == -1) {
@@ -259,6 +279,17 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
     if (d.response < 1) d.response = 1;
     if (d.radius < 1) d.radius = 1;
     if (d.tiles < 1) d.tiles = 1;
+    // FIX (bug review): tiles > min(w,h) put the last CLAHE tile past the
+    // frame edge (usize underflow / division by zero in clahe()). clahe()
+    // also guards per-tile, so this clamp is belt-and-braces.
+    {
+        const mt: i32 = @intCast(@min(width, height));
+        if (d.tiles > mt) d.tiles = mt;
+    }
+    // FIX (bug review): a negative clip_limit would make @intFromFloat
+    // convert a negative float to u32 (UB) inside clahe().
+    if (d.clip_limit < 0.0)
+        return c.avs_new_value_error("Aurora: clip_limit must be >= 0.");
     if (d.passes < 1) d.passes = 1;
     if (d.pg_smooth < 0.0) d.pg_smooth = 0.0;
     if (d.pg_smooth > 0.95) d.pg_smooth = 0.95;
@@ -275,9 +306,11 @@ fn auroraCreate(env: ?*c.AVS_ScriptEnvironment, args: c.AVS_Value, user_data: ?*
 
     d.prev_gain = allocator.alloc(f32, @intCast(d.avg_window)) catch
         return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(d.prev_gain);
     @memset(d.prev_gain, 0.0);
     d.pg_prev = allocator.alloc(f32, pixels) catch
         return c.avs_new_value_error("Aurora: out of memory.");
+    errdefer allocator.free(d.pg_prev);
 
     // Gaussian target in the working domain (sigma fixed at 1.5, as 1.8.7).
     common.buildGauss(&d.gauss, d.avg_work, 1.5, pixels);
@@ -319,7 +352,7 @@ fn auroraFree(fi: [*c]c.AVS_FilterInfo) callconv(.c) void {
 // ---------------------------------------------------------------------------
 // Legacy engine (0.1.5 separable edge-aware weighted mean), with passes.
 // ---------------------------------------------------------------------------
-fn legacyLocal(d: *AuroraData) void {
+fn legacyLocal(d: *AuroraData) error{OutOfMemory}!void {
     const W = d.width;
     const H = d.height;
     const r: i32 = d.radius;
@@ -369,13 +402,21 @@ fn separableWeightedMean(src: []const u8, dst: []f32, w: usize, h: usize, r: i32
     }
 }
 
-fn guidedLocal(d: *AuroraData) void {
+fn guidedLocal(d: *AuroraData) error{OutOfMemory}!void {
     const eps: f32 = 26.0; // (0.02 * 255)^2 — gentle edge preservation
-    common.guidedFilter(d.est_in, d.lbuf, d.tmp1, d.tmp2, d.width, d.height, @intCast(d.radius), eps);
+    try common.guidedFilter(d.est_in, d.lbuf, d.tmp1, d.tmp2, d.width, d.height, @intCast(d.radius), eps);
 }
 
-fn claheLocal(d: *AuroraData) void {
-    common.clahe(d.est_in, d.lbuf, d.width, d.height, @intCast(d.tiles), d.clip_limit);
+fn claheLocal(d: *AuroraData) error{OutOfMemory}!void {
+    try common.clahe(d.est_in, d.lbuf, d.width, d.height, @intCast(d.tiles), d.clip_limit);
+}
+
+fn runEngine(d: *AuroraData) error{OutOfMemory}!void {
+    switch (d.engine) {
+        .legacy => try legacyLocal(d),
+        .guided => try guidedLocal(d),
+        .clahe => try claheLocal(d),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +441,10 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
         d.index = 0;
         d.pg_prev_valid = false;
         d.hist_prev_valid = false;
+        // FIX (bug review): freezer=N must freeze frame N deterministically.
+        // A frozen table surviving from before the seek would make the
+        // result depend on evaluation history.
+        d.frozen = false;
     }
     d.last_n = nn;
 
@@ -519,12 +564,11 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
         2 => @as(f32, @floatFromInt(max_work)) >= d.lum_white,
         else => false,
     };
-    if (d.freezer >= 0) {
-        if (!d.frozen) {
-            common.buildYlut(&d.frozen_ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, d.protect_above / curr_gain));
-            d.frozen_gain = curr_gain;
-            d.frozen = true;
-        }
+    // freezer=N: statistics freeze from frame N onward; frames before N
+    // take the normal temporal path. FIX (bug review): the old code ignored
+    // N and froze at whatever frame the host happened to evaluate first —
+    // arbitrary after a seek.
+    if (d.freezer >= 0 and d.frozen) {
         ylut = d.frozen_ylut;
         curr_gain = d.frozen_gain;
     } else {
@@ -559,14 +603,21 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
         }
         curr_gain = d.last_gain;
         common.buildYlut(&ylut, &hist, &d.gauss, curr_gain, protect_on, d.lum_hi, common.fwd(d.domain, d.protect_above / curr_gain));
+        // Capture the (temporally smoothed) statistics at the freezer frame.
+        if (d.freezer >= 0 and nn >= d.freezer) {
+            d.frozen_ylut = ylut;
+            d.frozen_gain = curr_gain;
+            d.frozen = true;
+        }
     }
 
     // ---- 6-7. local estimator + gain map + corrector + reducer ----
-    switch (d.engine) {
-        .legacy => legacyLocal(d),
-        .guided => guidedLocal(d),
-        .clahe => claheLocal(d),
-    }
+    // FIX (bug review): an estimator OOM used to leave lbuf uninitialized
+    // while the frame was still returned. Fail the frame explicitly.
+    runEngine(d) catch {
+        fi.*.@"error" = "Aurora: out of memory.";
+        return null;
+    };
 
     for (0..N) |p| {
         const lum = d.lbuf[p];
@@ -587,7 +638,10 @@ fn auroraGetFrame(fi: [*c]c.AVS_FilterInfo, n: c_int) callconv(.c) [*c]c.AVS_Vid
 
     if (d.reducer > 0.0) {
         const rblur: usize = @intFromFloat(@ceil(d.reducer * 3.0));
-        common.boxBlur(d.pg, d.tmp1, W, H, rblur);
+        common.boxBlur(d.pg, d.tmp1, W, H, rblur) catch {
+            fi.*.@"error" = "Aurora: out of memory.";
+            return null;
+        };
         const a: f32 = @min(d.reducer, 1.0) * 0.5;
         for (0..N) |p| d.pg[p] = d.pg[p] * (1.0 - a) + d.tmp1[p] * a;
     }

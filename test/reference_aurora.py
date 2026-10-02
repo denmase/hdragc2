@@ -109,12 +109,18 @@ def separable_weighted(src_u8, w, h, r):
 
 def clahe(y, w, h, tiles, clip_limit):
     y = y.reshape(h, w)
+    # mirror of the Zig clamp: tiles larger than the frame pushed tiles
+    # past the edge (empty tile -> division by zero)
+    tiles = min(tiles, max(1, min(w, h)))
     tw = (w + tiles - 1) // tiles
     th = (h + tiles - 1) // tiles
     luts = np.zeros((tiles, tiles, 256), dtype=np.uint8)
     for ty in range(tiles):
         for tx in range(tiles):
             x0, y0 = tx * tw, ty * th
+            if x0 >= w or y0 >= h:  # empty edge tile: identity LUT
+                luts[ty, tx, :] = np.arange(256, dtype=np.uint8)
+                continue
             x1, y1 = min(x0 + tw, w), min(y0 + th, h)
             tile = y[y0:y1, x0:x1].ravel()
             hist = np.bincount(tile, minlength=256).astype(np.uint32)
@@ -209,7 +215,7 @@ class AuroraRef:
         self.corrector = f32(corrector); self.reducer = f32(reducer)
         self.black_clip = f32(black_clip); self.freezer = freezer
         self.radius = max(1, radius); self.clip_limit = f32(clip_limit)
-        self.tiles = max(1, tiles)
+        self.tiles = max(1, min(tiles, w, h))
         self.pg_smooth = min(max(f32(pg_smooth), f32(0.0)), f32(0.95))
         self.protect_above = f32(protect_above)
         self.chroma_mode = chroma_mode
@@ -240,6 +246,7 @@ class AuroraRef:
                 self.index = 0
                 self.pg_prev = None
                 self.hist_prev = None
+                self.frozen = False  # mirror of the Zig seek reset
             self._last_fr = fr
         w, h, N = self.w, self.h, self.w * self.h
         dom = self.domain
@@ -290,12 +297,7 @@ class AuroraRef:
         self.hist_prev = hist.copy()
         # 5. freezer / temporal
         protect_on = (self.protect == 1) or (self.protect == 2 and f32(max_work) >= self.lum_white)
-        if self.freezer >= 0:
-            if not self.frozen:
-                self.frozen_ylut = build_ylut(hist, self.gauss, curr_gain, protect_on,
-                                              self.lum_hi, fwd(self.domain, f32(self.protect_above) / curr_gain))
-                self.frozen_gain = curr_gain
-                self.frozen = True
+        if self.freezer >= 0 and self.frozen:
             ylut = self.frozen_ylut; curr_gain = self.frozen_gain
         else:
             if self.last_gain == 0.0:
@@ -315,6 +317,11 @@ class AuroraRef:
             curr_gain = self.last_gain
             ylut = build_ylut(hist, self.gauss, curr_gain, protect_on,
                               self.lum_hi, fwd(self.domain, f32(self.protect_above) / curr_gain))
+            # mirror of the Zig capture: freeze statistics at frame N
+            if self.freezer >= 0 and fr is not None and fr >= self.freezer:
+                self.frozen_ylut = ylut
+                self.frozen_gain = curr_gain
+                self.frozen = True
         # 6. estimator
         if self.engine == 'guided':
             lmap = guided_filter(est_in, w, h, self.radius)
